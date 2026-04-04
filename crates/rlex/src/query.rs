@@ -116,6 +116,7 @@ fn compact_iri(iri: &str) -> String {
         ("https://repolex.ai/ontology/lsp#", "lsp:"),
         ("https://repolex.ai/ontology/sem#", "sem:"),
         ("https://repolex.ai/ontology/extracts/gitpython-developers/GitPython/v3.1.46/core/", "git:"),
+        ("https://repolex.ai/ontology/repolex/security/", "security:"),
         ("https://repolex.ai/r/", "r:"),
         ("http://www.w3.org/1999/02/22-rdf-syntax-ns#", "rdf:"),
         ("http://www.w3.org/2000/01/rdf-schema#", "rdfs:"),
