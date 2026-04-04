@@ -59,14 +59,11 @@ enum Commands {
         format: String,
     },
 
-    /// Start oxigraph SPARQL endpoint in background (:7878)
+    /// Start SPARQL HTTP endpoint + catalog API
     Serve {
-        /// Port for SPARQL endpoint
+        /// Port for HTTP server
         #[arg(short, long, default_value = "7878")]
         port: u16,
-        /// Stop the background server
-        #[arg(long)]
-        stop: bool,
     },
 
     /// Start viz UI + SPARQL endpoint in background (:3000 + :7878)
@@ -274,8 +271,8 @@ fn main() -> Result<()> {
             load::run(&config, org, name, commit.as_deref())?;
         }
         Commands::Query { sparql, format } => { query::run(&config, &sparql, &format)?; }
-        Commands::Serve { port, stop } => { serve::run(port, stop)?; }
-        Commands::Viz { port, sparql_port, stop } => { viz::run(port, sparql_port, stop)?; }
+        Commands::Serve { port } => { serve::run(&config, port)?; }
+        Commands::Viz { port, sparql_port, stop } => { viz::run(&config, port, sparql_port, stop)?; }
         Commands::Config => {
             println!("{}", toml::to_string_pretty(&config)?);
         }
