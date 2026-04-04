@@ -1,0 +1,25 @@
+[package]
+name = "rlex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SPARQL query tool for repolex code knowledge graphs"
+
+[[bin]]
+name = "rlex"
+path = "src/main.rs"
+
+[dependencies]
+oxigraph.workspace = true
+json-ld.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+walkdir.workspace = true
+flate2.workspace = true
