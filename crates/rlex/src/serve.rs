@@ -21,6 +21,111 @@ struct AppState {
     viz_dir: Option<PathBuf>,
 }
 
+/// Spawn rlex serve as a background process, write pidfile, optionally open browser
+pub fn background(config: &Config, port: u16, viz_dir: Option<&str>, open_browser: bool) -> Result<()> {
+    let pidfile = config.paths.root.join("serve.pid");
+
+    // Check if already running
+    if pidfile.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pidfile) {
+            let pid = pid_str.trim();
+            // Check if process is alive
+            let status = std::process::Command::new("kill")
+                .args(["-0", pid])
+                .output();
+            if status.map(|s| s.status.success()).unwrap_or(false) {
+                let url = format!("http://localhost:{}", port);
+                println!("rlex serve already running (pid {})", pid);
+                println!("  {}", url);
+                if open_browser {
+                    let _ = open_url(&url);
+                }
+                return Ok(());
+            }
+            // Stale pidfile, remove it
+            let _ = std::fs::remove_file(&pidfile);
+        }
+    }
+
+    // Build args for the background process
+    let exe = std::env::current_exe().context("finding rlex binary")?;
+    let mut args = vec![
+        "serve".to_string(),
+        "--foreground".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--no-browser".to_string(),
+    ];
+    if let Some(dir) = viz_dir {
+        args.push("--viz-dir".to_string());
+        args.push(dir.to_string());
+    }
+
+    let child = std::process::Command::new(&exe)
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("spawning background rlex serve")?;
+
+    let pid = child.id();
+    std::fs::write(&pidfile, pid.to_string())
+        .context("writing pidfile")?;
+
+    let url = format!("http://localhost:{}", port);
+    println!("rlex serve started (pid {})", pid);
+    println!("  {}", url);
+    println!("  pidfile: {}", pidfile.display());
+    println!("  stop: rlex serve --stop");
+
+    // Give server a moment to start
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    if open_browser {
+        if let Some(viz) = viz_dir {
+            println!("  opening browser...");
+            let _ = open_url(&url);
+        } else {
+            println!("  SPARQL endpoint ready (no viz dir, skipping browser)");
+        }
+    }
+
+    Ok(())
+}
+
+/// Stop a running background server
+pub fn stop(config: &Config) -> Result<()> {
+    let pidfile = config.paths.root.join("serve.pid");
+    if !pidfile.exists() {
+        println!("No running server found.");
+        return Ok(());
+    }
+
+    let pid_str = std::fs::read_to_string(&pidfile)?;
+    let pid = pid_str.trim();
+
+    let status = std::process::Command::new("kill")
+        .arg(pid)
+        .output();
+
+    match status {
+        Ok(s) if s.status.success() => println!("Stopped rlex serve (pid {})", pid),
+        _ => println!("Process {} not running (stale pidfile)", pid),
+    }
+
+    std::fs::remove_file(&pidfile)?;
+    Ok(())
+}
+
+fn open_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open").arg(url).spawn()?;
+    #[cfg(target_os = "linux")]
+    std::process::Command::new("xdg-open").arg(url).spawn()?;
+    Ok(())
+}
+
+/// Run server in foreground (blocking)
 pub fn run(config: &Config, port: u16, viz_dir: Option<&str>) -> Result<()> {
     let store = Store::open_read_only(&config.paths.oxigraph)
         .with_context(|| format!("opening oxigraph store at {}", config.paths.oxigraph.display()))?;

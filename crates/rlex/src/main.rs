@@ -67,6 +67,15 @@ enum Commands {
         /// Directory containing index.html for viz UI
         #[arg(long)]
         viz_dir: Option<String>,
+        /// Stop a running server
+        #[arg(long)]
+        stop: bool,
+        /// Run in foreground (don't background)
+        #[arg(long)]
+        foreground: bool,
+        /// Don't open browser
+        #[arg(long)]
+        no_browser: bool,
     },
 
     /// Start viz UI + SPARQL endpoint in background (:3000 + :7878)
@@ -274,7 +283,15 @@ fn main() -> Result<()> {
             load::run(&config, org, name, commit.as_deref())?;
         }
         Commands::Query { sparql, format } => { query::run(&config, &sparql, &format)?; }
-        Commands::Serve { port, viz_dir } => { serve::run(&config, port, viz_dir.as_deref())?; }
+        Commands::Serve { port, viz_dir, stop, foreground, no_browser } => {
+            if stop {
+                serve::stop(&config)?;
+            } else if foreground {
+                serve::run(&config, port, viz_dir.as_deref())?;
+            } else {
+                serve::background(&config, port, viz_dir.as_deref(), !no_browser)?;
+            }
+        }
         Commands::Viz { port, sparql_port, stop } => { viz::run(&config, port, sparql_port, stop)?; }
         Commands::Config => {
             println!("{}", toml::to_string_pretty(&config)?);
