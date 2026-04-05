@@ -2792,6 +2792,7 @@ dependencies = [
  "flate2",
  "json-ld",
  "oxigraph",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

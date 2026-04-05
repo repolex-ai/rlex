@@ -28,3 +28,4 @@ toml_edit.workspace = true
 walkdir.workspace = true
 flate2.workspace = true
 urlencoding.workspace = true
+regex.workspace = true

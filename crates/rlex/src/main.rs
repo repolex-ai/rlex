@@ -59,11 +59,14 @@ enum Commands {
         format: String,
     },
 
-    /// Start SPARQL HTTP endpoint + catalog API
+    /// Start SPARQL HTTP endpoint + viz API + catalog API
     Serve {
         /// Port for HTTP server
         #[arg(short, long, default_value = "7878")]
         port: u16,
+        /// Directory containing index.html for viz UI
+        #[arg(long)]
+        viz_dir: Option<String>,
     },
 
     /// Start viz UI + SPARQL endpoint in background (:3000 + :7878)
@@ -271,7 +274,7 @@ fn main() -> Result<()> {
             load::run(&config, org, name, commit.as_deref())?;
         }
         Commands::Query { sparql, format } => { query::run(&config, &sparql, &format)?; }
-        Commands::Serve { port } => { serve::run(&config, port)?; }
+        Commands::Serve { port, viz_dir } => { serve::run(&config, port, viz_dir.as_deref())?; }
         Commands::Viz { port, sparql_port, stop } => { viz::run(&config, port, sparql_port, stop)?; }
         Commands::Config => {
             println!("{}", toml::to_string_pretty(&config)?);
