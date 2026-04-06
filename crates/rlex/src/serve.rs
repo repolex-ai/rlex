@@ -318,8 +318,83 @@ async fn graph(
         })
     }).collect();
 
-    let links: Vec<serde_json::Value> = Vec::new();
-    // TODO: edge matching via callsite position overlap — expensive, optimize later
+    // Build function index by blob hash for position-based edge matching
+    // fn URI: .../blob/{blobhash}#name_startRow_startCol_endRow_endCol
+    let mut fn_by_blob: std::collections::HashMap<String, Vec<(String, i64, i64)>> = std::collections::HashMap::new();
+    for id in &node_ids {
+        if let Some((blob, start, end)) = parse_fn_position(id) {
+            fn_by_blob.entry(blob).or_default().push((id.clone(), start, end));
+        }
+    }
+
+    // Query callsites with row positions and call text
+    let cs_query = format!(
+        r#"SELECT ?cs ?csRow ?text WHERE {{
+            GRAPH <{ast_graph}> {{
+                ?cs a <https://repolex.ai/ontology/repolex/ast-extension/CallSite> ;
+                    <https://repolex.ai/ontology/extracts/tree-sitter/tree-sitter/v0.25/core/startRow> ?csRow ;
+                    <https://repolex.ai/ontology/extracts/tree-sitter/tree-sitter/v0.25/core/text> ?text .
+            }}
+        }} LIMIT 5000"#
+    );
+    let cs_rows = query_to_rows(&state.store, &cs_query);
+
+    // Build name→id lookup for target matching
+    let mut name_to_ids: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for row in &nodes {
+        let name = row.get("name").map(|v| v.as_str()).unwrap_or("");
+        let fn_uri = row.get("fn").map(|v| v.as_str()).unwrap_or("");
+        let clean = clean_fn_name(name);
+        name_to_ids.entry(clean).or_default().push(fn_uri.to_string());
+    }
+
+    let mut link_set = std::collections::HashSet::new();
+    let mut links = Vec::new();
+
+    for cs_row in &cs_rows {
+        let cs_uri = cs_row.get("cs").map(|v| v.as_str()).unwrap_or("");
+        let row_num: i64 = cs_row.get("csRow").map(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(-1);
+        let text = cs_row.get("text").map(|v| v.as_str()).unwrap_or("");
+
+        // Extract called function name from text: "foo.bar()" → "bar", "baz()" → "baz"
+        let called_fn = extract_called_fn(text);
+        if called_fn.is_empty() {
+            continue;
+        }
+
+        if let Some(blob) = extract_blob_hash(cs_uri) {
+            // Find enclosing function (narrowest span containing this row)
+            if let Some(fns) = fn_by_blob.get(blob) {
+                let mut best_caller: Option<&str> = None;
+                let mut best_span = i64::MAX;
+                for (fn_id, start, end) in fns {
+                    if row_num >= *start && row_num <= *end {
+                        let span = end - start;
+                        if span < best_span {
+                            best_span = span;
+                            best_caller = Some(fn_id.as_str());
+                        }
+                    }
+                }
+
+                if let Some(caller) = best_caller {
+                    if let Some(targets) = name_to_ids.get(&called_fn) {
+                        for target in targets {
+                            if target != caller {
+                                let key = format!("{}→{}", caller, target);
+                                if link_set.insert(key) {
+                                    links.push(serde_json::json!({
+                                        "source": caller,
+                                        "target": target,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Json(serde_json::json!({
         "repo": repo,
@@ -473,6 +548,23 @@ fn clean_fn_name(name: &str) -> String {
     // Strip position suffix: name_startRow_startCol_endRow_endCol
     let re = regex::Regex::new(r"_\d+_\d+_\d+_\d+$").unwrap();
     re.replace(name, "").to_string()
+}
+
+/// Extract the called function name from call text
+/// "transport._build_command()" → "_build_command"
+/// "with_tools_example()" → "with_tools_example"
+/// "isinstance(msg, ...)" → "isinstance"
+/// "self.foo()" → "foo"
+fn extract_called_fn(text: &str) -> String {
+    // Find the opening paren
+    let paren = match text.find('(') {
+        Some(i) => i,
+        None => return String::new(),
+    };
+    let before_paren = &text[..paren];
+    // Take the last dotted component: "a.b.c" → "c"
+    let name = before_paren.rsplit('.').next().unwrap_or(before_paren);
+    name.trim().to_string()
 }
 
 fn extract_blob_hash(uri: &str) -> Option<&str> {
