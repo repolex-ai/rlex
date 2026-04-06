@@ -293,17 +293,40 @@ async fn graph(
 
     let nodes = query_to_rows(&state.store, &fn_query);
 
-    // Process nodes — extract file path from function URI blob hash
+    // Build blob hash → file path map from filetree graph
+    let blob_map = if let Some(ft_graph) = find_graph(&state.store, repo, "/filetree/") {
+        let bm_query = format!(
+            r#"SELECT ?blobHash ?path WHERE {{
+                GRAPH <{ft_graph}> {{
+                    ?blob <https://repolex.ai/ontology/repolex/blobHash> ?blobHash ;
+                          <https://repolex.ai/ontology/repolex/filePath> ?path .
+                }}
+            }}"#
+        );
+        let bm_rows = query_to_rows(&state.store, &bm_query);
+        let mut map = std::collections::HashMap::new();
+        for row in &bm_rows {
+            let hash = row.get("blobHash").map(|v| v.as_str()).unwrap_or("");
+            let path = row.get("path").map(|v| v.as_str()).unwrap_or("");
+            if !hash.is_empty() {
+                map.insert(hash.to_string(), path.to_string());
+            }
+        }
+        map
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Process nodes — resolve file paths via blob hash
     let mut node_ids = std::collections::HashSet::new();
     let processed_nodes: Vec<serde_json::Value> = nodes.iter().map(|row| {
         let fn_uri = row.get("fn").map(|v| v.as_str()).unwrap_or("");
         let name = row.get("name").map(|v| v.as_str()).unwrap_or("");
         let clean_name = clean_fn_name(name);
 
-        // Extract file info from the function URI fragment
-        // URI: .../blob/{hash}#name_startRow_startCol_endRow_endCol
-        // We use the blob hash portion of the path as a group key
         let blob_hash = extract_blob_hash(fn_uri).unwrap_or("unknown");
+        let path = blob_map.get(blob_hash).cloned().unwrap_or_default();
+        let file = path.rsplit('/').next().unwrap_or("").to_string();
 
         node_ids.insert(fn_uri.to_string());
 
@@ -311,8 +334,8 @@ async fn graph(
             "id": fn_uri,
             "name": clean_name,
             "fullName": name,
-            "path": blob_hash,
-            "file": blob_hash,
+            "path": path,
+            "file": file,
             "complexity": row.get("complexity").map(|v| v.as_str()).and_then(|s| s.parse::<i64>().ok()).unwrap_or(1),
             "lines": row.get("lines").map(|v| v.as_str()).and_then(|s| s.parse::<i64>().ok()).unwrap_or(1),
         })
@@ -440,6 +463,30 @@ async fn cluster(
 
     let nodes = query_to_rows(&state.store, &fn_query);
 
+    // Build blob hash → file path map
+    let blob_map = if let Some(ft_graph) = find_graph(&state.store, repo, "/filetree/") {
+        let bm_query = format!(
+            r#"SELECT ?blobHash ?path WHERE {{
+                GRAPH <{ft_graph}> {{
+                    ?blob <https://repolex.ai/ontology/repolex/blobHash> ?blobHash ;
+                          <https://repolex.ai/ontology/repolex/filePath> ?path .
+                }}
+            }}"#
+        );
+        let bm_rows = query_to_rows(&state.store, &bm_query);
+        let mut map = std::collections::HashMap::new();
+        for row in &bm_rows {
+            let hash = row.get("blobHash").map(|v| v.as_str()).unwrap_or("");
+            let path = row.get("path").map(|v| v.as_str()).unwrap_or("");
+            if !hash.is_empty() {
+                map.insert(hash.to_string(), path.to_string());
+            }
+        }
+        map
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut files_set = std::collections::BTreeSet::new();
 
     let processed_nodes: Vec<serde_json::Value> = nodes.iter().map(|row| {
@@ -447,15 +494,19 @@ async fn cluster(
         let name = row.get("name").map(|v| v.as_str()).unwrap_or("");
         let clean_name = clean_fn_name(name);
         let blob_hash = extract_blob_hash(fn_uri).unwrap_or("unknown");
+        let path = blob_map.get(blob_hash).cloned().unwrap_or_default();
+        let file = path.rsplit('/').next().unwrap_or("").to_string();
 
-        files_set.insert(blob_hash.to_string());
+        if !path.is_empty() {
+            files_set.insert(path.clone());
+        }
 
         serde_json::json!({
             "id": fn_uri,
             "name": clean_name,
             "fullName": name,
-            "path": blob_hash,
-            "file": blob_hash,
+            "path": path,
+            "file": file,
             "complexity": row.get("complexity").map(|v| v.as_str()).and_then(|s| s.parse::<i64>().ok()).unwrap_or(1),
             "lines": row.get("lines").map(|v| v.as_str()).and_then(|s| s.parse::<i64>().ok()).unwrap_or(1),
         })
