@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use anyhow::Result;
 
 mod catalog;
+mod compaction;
 mod config;
 mod download;
 mod index;

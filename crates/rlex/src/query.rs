@@ -1,9 +1,10 @@
 use anyhow::{bail, Context, Result};
-use oxigraph::io::RdfFormat;
+use oxigraph::io::{JsonLdProfile, RdfFormat};
 use oxigraph::sparql::{QueryResults, Variable};
 use oxigraph::store::Store;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 
+use crate::compaction;
 use crate::config::Config;
 
 pub fn run(config: &Config, sparql: &str, format: &str) -> Result<()> {
@@ -49,6 +50,48 @@ pub fn run(config: &Config, sparql: &str, format: &str) -> Result<()> {
         }
 
         QueryResults::Graph(triples) => {
+            // JSON-LD compaction path: serialize to expanded JSON-LD, then compact
+            // via the embedded repolex context. Target: 85-90% token reduction for
+            // LLM consumption.
+            if matches!(format, "json-ld" | "jsonld") {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut serializer = oxigraph::io::RdfSerializer::from_format(
+                    RdfFormat::JsonLd {
+                        profile: JsonLdProfile::Streaming.into(),
+                    },
+                )
+                .for_writer(&mut buf);
+
+                let mut count = 0u64;
+                for triple in triples {
+                    let triple = triple.context("reading CONSTRUCT result")?;
+                    serializer
+                        .serialize_triple(&triple)
+                        .context("serializing triple")?;
+                    count += 1;
+                }
+                serializer.finish().context("finishing serialization")?;
+
+                let expanded = String::from_utf8(buf)
+                    .context("expanded JSON-LD was not valid UTF-8")?;
+                let compacted = compaction::compact(&expanded)
+                    .context("compacting JSON-LD with repolex context")?;
+
+                let stdout = std::io::stdout();
+                let mut writer = BufWriter::new(stdout.lock());
+                writer.write_all(compacted.as_bytes())?;
+                writer.write_all(b"\n")?;
+
+                eprintln!(
+                    "\n{} triples, expanded {} bytes → compact {} bytes ({:.1}% reduction)",
+                    count,
+                    expanded.len(),
+                    compacted.len(),
+                    100.0 * (1.0 - compacted.len() as f64 / expanded.len().max(1) as f64),
+                );
+                return Ok(());
+            }
+
             let stdout = std::io::stdout();
             let mut writer = BufWriter::new(stdout.lock());
 
