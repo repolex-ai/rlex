@@ -19,6 +19,10 @@ struct AppState {
     store: Store,
     catalog_path: PathBuf,
     viz_dir: Option<PathBuf>,
+    /// Time the store handle was opened. Used by /api/store-info so the viz
+    /// can show a snapshot-pill warning about silent staleness until we port
+    /// W4R3Z's per-query reopen fix.
+    snapshot_at: String,
 }
 
 /// Spawn rlex serve as a background process, write pidfile, optionally open browser
@@ -132,10 +136,13 @@ pub fn run(config: &Config, port: u16, viz_dir: Option<&str>) -> Result<()> {
 
     let viz_path = viz_dir.map(PathBuf::from);
 
+    let snapshot_at = iso8601_utc_now();
+
     let state = Arc::new(AppState {
         store,
         catalog_path: config.paths.root.join("catalog.json"),
         viz_dir: viz_path.clone(),
+        snapshot_at,
     });
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -144,6 +151,7 @@ pub fn run(config: &Config, port: u16, viz_dir: Option<&str>) -> Result<()> {
             .route("/query", get(sparql_get).post(sparql_post))
             .route("/sparql", get(sparql_get).post(sparql_post))
             .route("/api/catalog", get(catalog))
+            .route("/api/store-info", get(store_info))
             .route("/health", get(health));
 
         // Serve index.html from viz dir if provided
@@ -306,4 +314,47 @@ async fn catalog(State(state): State<Arc<AppState>>) -> Response {
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok", "service": "rlex"}))
+}
+
+/// `/api/store-info` — shape expected by repolex-viz's snapshot pill:
+/// `{"snapshot_at": "2026-04-09T12:34:56Z"}`. Currently returns the time the
+/// store handle was opened at server startup. When per-query reopen lands,
+/// this should reflect the most-recent reopen time instead.
+async fn store_info(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "snapshot_at": state.snapshot_at,
+    }))
+}
+
+/// Format current UTC time as a Z-suffixed ISO 8601 string without pulling
+/// in chrono. `SystemTime → seconds since epoch → date/time components`.
+fn iso8601_utc_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Days since 1970-01-01
+    let days = (secs / 86_400) as i64;
+    let time_of_day = (secs % 86_400) as u32;
+    let hh = time_of_day / 3600;
+    let mm = (time_of_day % 3600) / 60;
+    let ss = time_of_day % 60;
+
+    // Civil-from-days algorithm (Howard Hinnant). Produces (year, month, day).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, m, d, hh, mm, ss
+    )
 }
