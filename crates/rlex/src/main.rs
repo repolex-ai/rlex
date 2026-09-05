@@ -58,6 +58,12 @@ enum Commands {
         /// Output format: json, csv, tsv, table, turtle, ntriples, json-ld
         #[arg(short, long, default_value = "table")]
         format: String,
+        /// Query only the bare default graph. By default rlex treats the
+        /// default graph as the union of all named graphs, so a query without
+        /// a GRAPH clause still finds forx's per-repo data instead of silently
+        /// returning nothing. Pass this for strict SPARQL default-graph semantics.
+        #[arg(long)]
+        no_union: bool,
     },
 
     /// Start SPARQL HTTP endpoint + viz API + catalog API
@@ -283,7 +289,7 @@ fn main() -> Result<()> {
             let (org, name) = parse_repo(&repo)?;
             load::run(&config, org, name, commit.as_deref())?;
         }
-        Commands::Query { sparql, format } => { query::run(&config, &sparql, &format)?; }
+        Commands::Query { sparql, format, no_union } => { query::run(&config, &sparql, &format, !no_union)?; }
         Commands::Serve { port, viz_dir, stop, foreground, no_browser } => {
             if stop {
                 serve::stop(&config)?;

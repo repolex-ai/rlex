@@ -231,8 +231,14 @@ fn error_json(msg: String) -> Response {
 }
 
 fn execute_sparql(store: &Store, sparql: &str) -> Response {
-    #[allow(deprecated)]
-    let results = match store.query(sparql) {
+    // Union the named graphs into the default graph unless the query names its
+    // own dataset — the same door-open behavior the CLI uses, so agents hitting
+    // the endpoint don't get a silent empty result off forx's named-graph data.
+    let query = match crate::query::build_query(sparql, true) {
+        Ok(q) => q,
+        Err(e) => return error_json(e.to_string()),
+    };
+    let results = match store.query(query) {
         Ok(r) => r,
         Err(e) => return error_json(e.to_string()),
     };

@@ -1,17 +1,17 @@
 use anyhow::{bail, Context, Result};
 use oxigraph::io::{JsonLdProfile, RdfFormat};
-use oxigraph::sparql::{QueryResults, Variable};
+use oxigraph::sparql::{Query, QueryResults, Variable};
 use oxigraph::store::Store;
 use std::io::{BufWriter, Write};
 
 use crate::compaction;
 use crate::config::Config;
 
-pub fn run(config: &Config, sparql: &str, format: &str) -> Result<()> {
+pub fn run(config: &Config, sparql: &str, format: &str, union: bool) -> Result<()> {
     let store = Store::open_read_only(&config.paths.oxigraph)
         .with_context(|| format!("opening oxigraph store at {}", config.paths.oxigraph.display()))?;
 
-    let results = store.query(sparql)
+    let results = store.query(build_query(sparql, union)?)
         .with_context(|| "executing SPARQL query")?;
 
     match results {
@@ -120,6 +120,30 @@ pub fn run(config: &Config, sparql: &str, format: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse a SPARQL string into a query, and — unless it names its own dataset
+/// with `FROM` — make the default graph the union of every named graph in the
+/// store.
+///
+/// forx files each repo's quads under a named graph IRI
+/// (`https://repolex.ai/r/{org}/{repo}/ast/{sha}` and friends), so nothing
+/// lives in the store's bare default graph. Without this, the most natural
+/// query an agent writes — `SELECT * WHERE { ?s ?p ?o }` with no `GRAPH`
+/// wrapper — matches the empty default graph and returns zero rows with no
+/// error: the silent-empty trap. Unioning the named graphs into the default
+/// makes that query just work.
+///
+/// We only touch queries that left their dataset unspecified
+/// (`is_default_dataset()`); a query that wrote its own `FROM` / `FROM NAMED`
+/// meant it, so we leave it exactly as authored.
+pub fn build_query(sparql: &str, union: bool) -> Result<Query> {
+    let mut query = Query::parse(sparql, None)
+        .with_context(|| "parsing SPARQL query")?;
+    if union && query.dataset().is_default_dataset() {
+        query.dataset_mut().set_default_graph_as_union();
+    }
+    Ok(query)
 }
 
 fn format_term(term: &oxigraph::model::Term) -> String {
