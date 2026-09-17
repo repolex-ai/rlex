@@ -6,14 +6,21 @@ mod bench;
 mod calls;
 mod catalog;
 mod client;
+mod closure;
 mod compaction;
 mod config;
+mod cycles;
+mod diamond;
 mod download;
 mod index;
 mod load;
+mod moreinfo;
 mod query;
+mod registry;
+mod scan_guard;
 mod serve;
 mod viz;
+mod warmup;
 
 #[derive(Parser)]
 #[command(name = "rlex", about = "SPARQL query tool for repolex knowledge graphs")]
@@ -68,6 +75,9 @@ enum Commands {
         /// returning nothing. Pass this for strict SPARQL default-graph semantics.
         #[arg(long)]
         no_union: bool,
+        /// Abort execution if unindexed full-store scan hazards are detected (e.g. the CONTAINS trap)
+        #[arg(long)]
+        strict_scan_guard: bool,
     },
 
     /// Start SPARQL HTTP endpoint + viz API + catalog API
@@ -154,6 +164,84 @@ enum Commands {
         suite: String,
 
         /// Output results as JSON for CI/CD tracking
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Discover deep transitive call graph closures across repository boundaries
+    Closure {
+        /// Source repository (e.g. regex, actix-web, syn, rlex)
+        #[arg(short, long)]
+        from: String,
+
+        /// Optional filter for target repository / package
+        #[arg(short, long)]
+        to: Option<String>,
+
+        /// Maximum transitive hop depth (1-6, default: 3)
+        #[arg(short, long, default_value = "3")]
+        depth: usize,
+
+        /// Output format: ascii (default), table, json
+        #[arg(long, default_value = "ascii")]
+        format: String,
+
+        /// SPARQL endpoint URL (default: local store or http://localhost:7878/query)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+    },
+
+    /// Solve diamond dependency convergence patterns across multiple branches
+    Diamond {
+        /// Root repository to analyze (e.g. syn, regex, axum)
+        #[arg(short, long)]
+        from: String,
+
+        /// Optional filter for converged target repository / package
+        #[arg(short, long)]
+        to: Option<String>,
+
+        /// Output format: ascii (default), json
+        #[arg(long, default_value = "ascii")]
+        format: String,
+
+        /// SPARQL endpoint URL (default: local store or http://localhost:7878/query)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+    },
+
+    /// Detect cyclic dependencies and mutual recursion patterns
+    Cycles {
+        /// Target repository to inspect (default: scans ecosystem backbone)
+        #[arg(short, long)]
+        repo: Option<String>,
+
+        /// Output format: ascii (default), json
+        #[arg(long, default_value = "ascii")]
+        format: String,
+
+        /// SPARQL endpoint URL (default: local store or http://localhost:7878/query)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+    },
+
+    /// Pre-warm RocksDB SST index and bloom filter blocks for core ecosystem graphs
+    Warmup {
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+
+        /// SPARQL endpoint URL (default: local store or http://localhost:7878/query)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+    },
+
+    /// View in-binary documentation guides and tested SPARQL query recipes
+    Moreinfo {
+        /// Documentation topic (e.g. recipes, closures, diamond, cycles, scan-guard, prefixes)
+        topic: Option<String>,
+
+        /// Emit structured JSON for LLM agent tools
         #[arg(long)]
         json: bool,
     },
@@ -346,13 +434,13 @@ fn main() -> Result<()> {
             let (org, name) = parse_repo(&repo)?;
             load::run(&config, org, name, commit.as_deref())?;
         }
-        Commands::Query { sparql, format, no_union } => {
+        Commands::Query { sparql, format, no_union, strict_scan_guard } => {
             let query_str = if std::path::Path::new(&sparql).is_file() {
                 std::fs::read_to_string(&sparql)?
             } else {
                 sparql
             };
-            query::run(&config, &query_str, &format, !no_union)?;
+            query::run(&config, &query_str, &format, !no_union, strict_scan_guard)?;
         }
         Commands::Calls { from, to, hops, format, endpoint } => {
             calls::run(
@@ -365,6 +453,45 @@ fn main() -> Result<()> {
                     endpoint,
                 },
             )?;
+        }
+        Commands::Closure { from, to, depth, format, endpoint } => {
+            closure::run(
+                &config,
+                &closure::ClosureOptions {
+                    from,
+                    to,
+                    max_depth: depth,
+                    format,
+                    endpoint,
+                },
+            )?;
+        }
+        Commands::Diamond { from, to, format, endpoint } => {
+            diamond::run(
+                &config,
+                &diamond::DiamondOptions {
+                    from,
+                    to,
+                    format,
+                    endpoint,
+                },
+            )?;
+        }
+        Commands::Cycles { repo, format, endpoint } => {
+            cycles::run(
+                &config,
+                &cycles::CyclesOptions {
+                    repo,
+                    format,
+                    endpoint,
+                },
+            )?;
+        }
+        Commands::Warmup { json, endpoint } => {
+            warmup::run(&config, endpoint.as_deref(), json)?;
+        }
+        Commands::Moreinfo { topic, json } => {
+            moreinfo::run(topic.as_deref(), json)?;
         }
         Commands::Audit { json, endpoint } => {
             audit::run(&config, json, endpoint.as_deref())?;

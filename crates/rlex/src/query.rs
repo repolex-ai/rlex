@@ -7,7 +7,15 @@ use std::io::{BufWriter, Write};
 use crate::compaction;
 use crate::config::Config;
 
-pub fn run(config: &Config, sparql: &str, format: &str, union: bool) -> Result<()> {
+pub fn run(config: &Config, sparql: &str, format: &str, union: bool, strict_scan_guard: bool) -> Result<()> {
+    let hazards = crate::scan_guard::lint_query(sparql);
+    if !hazards.is_empty() {
+        crate::scan_guard::print_hazards(&hazards);
+        if strict_scan_guard {
+            bail!("Query rejected by strict scan guard ({} hazard(s) detected). Pass without --strict-scan-guard to force execution.", hazards.len());
+        }
+    }
+
     let store = Store::open_read_only(&config.paths.oxigraph)
         .with_context(|| format!("opening oxigraph store at {}", config.paths.oxigraph.display()))?;
 
