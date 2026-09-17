@@ -84,9 +84,9 @@ pub fn resolve_repo(query: &str, cache_root: Option<&Path>) -> Option<RepoRef> {
     }
 
     // 3. Dynamic search in ~/.rlex/cache if path provided
-    if let Some(cache_dir) = cache_root {
-        if cache_dir.exists() {
-            if let Ok(org_entries) = std::fs::read_dir(cache_dir) {
+    if let Some(cache_dir) = cache_root
+        && cache_dir.exists()
+            && let Ok(org_entries) = std::fs::read_dir(cache_dir) {
                 for org_entry in org_entries.flatten() {
                     let org_name = org_entry.file_name().to_string_lossy().to_string();
                     if let Ok(repo_entries) = std::fs::read_dir(org_entry.path()) {
@@ -112,8 +112,6 @@ pub fn resolve_repo(query: &str, cache_root: Option<&Path>) -> Option<RepoRef> {
                     }
                 }
             }
-        }
-    }
 
     None
 }

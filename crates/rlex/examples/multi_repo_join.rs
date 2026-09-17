@@ -91,7 +91,7 @@ fn lit(t: Option<&Term>) -> String {
     }
 }
 
-fn short(p: &PathBuf) -> String {
+fn short(p: &std::path::Path) -> String {
     let s = p.to_string_lossy();
     s.strip_prefix("/tmp/repolex_sample/").map(|x| x.to_string()).unwrap_or_else(|| s.to_string())
 }

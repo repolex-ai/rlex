@@ -14,6 +14,7 @@ struct Cli {
     sparql_url: String,
 }
 
+#[allow(dead_code)]
 struct AppState {
     sparql_url: String,
 }

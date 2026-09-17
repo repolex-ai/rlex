@@ -30,8 +30,8 @@ pub fn background(config: &Config, port: u16, viz_dir: Option<&str>, open_browse
     let pidfile = config.paths.root.join("serve.pid");
 
     // Check if already running
-    if pidfile.exists() {
-        if let Ok(pid_str) = std::fs::read_to_string(&pidfile) {
+    if pidfile.exists()
+        && let Ok(pid_str) = std::fs::read_to_string(&pidfile) {
             let pid = pid_str.trim();
             // Check if process is alive
             let status = std::process::Command::new("kill")
@@ -49,7 +49,6 @@ pub fn background(config: &Config, port: u16, viz_dir: Option<&str>, open_browse
             // Stale pidfile, remove it
             let _ = std::fs::remove_file(&pidfile);
         }
-    }
 
     // Build args for the background process
     let exe = std::env::current_exe().context("finding rlex binary")?;
@@ -215,8 +214,8 @@ async fn sparql_post(
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> Response {
-    let sparql = if body.starts_with("query=") {
-        urlencoding::decode(&body[6..])
+    let sparql = if let Some(stripped) = body.strip_prefix("query=") {
+        urlencoding::decode(stripped)
             .unwrap_or_default()
             .to_string()
     } else {

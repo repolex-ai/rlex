@@ -49,7 +49,7 @@ impl Client {
                     .timeout(std::time::Duration::from_millis(500))
                     .build()?;
 
-                if check_client.get(&format!("{}/health", server_url)).send().is_ok() {
+                if check_client.get(format!("{}/health", server_url)).send().is_ok() {
                     Ok(Self {
                         endpoint: Some(query_url),
                         store: None,
@@ -148,7 +148,7 @@ impl Client {
                         let sol = solution?;
                         let row: Vec<String> = variables
                             .iter()
-                            .map(|v| sol.get(v).map(|t| format_term(t)).unwrap_or_default())
+                            .map(|v| sol.get(v).map(format_term).unwrap_or_default())
                             .collect();
                         rows.push(row);
                     }

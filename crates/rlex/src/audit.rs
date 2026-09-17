@@ -174,11 +174,10 @@ fn calculate_dir_size(path: &Path) -> Result<u64> {
         return Ok(0);
     }
     for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-        if let Ok(meta) = entry.metadata() {
-            if meta.is_file() {
+        if let Ok(meta) = entry.metadata()
+            && meta.is_file() {
                 total += meta.len();
             }
-        }
     }
     Ok(total)
 }
@@ -236,7 +235,7 @@ fn format_number(n: u64) -> String {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len();
     for (i, c) in chars.iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             res.push(',');
         }
         res.push(*c);

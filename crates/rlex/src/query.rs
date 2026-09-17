@@ -33,7 +33,7 @@ pub fn run(config: &Config, sparql: &str, format: &str, union: bool, strict_scan
                     .iter()
                     .map(|var| {
                         solution.get(var)
-                            .map(|term| format_term(term))
+                            .map(format_term)
                             .unwrap_or_default()
                     })
                     .collect();
@@ -163,9 +163,8 @@ pub fn format_term(term: &oxigraph::model::Term) -> String {
         }
         oxigraph::model::Term::BlankNode(b) => format!("_:{}", b.as_str()),
         oxigraph::model::Term::Literal(l) => {
-            if l.datatype() == oxigraph::model::vocab::xsd::STRING {
-                l.value().to_string()
-            } else if l.datatype() == oxigraph::model::vocab::xsd::INTEGER
+            if l.datatype() == oxigraph::model::vocab::xsd::STRING
+                || l.datatype() == oxigraph::model::vocab::xsd::INTEGER
                 || l.datatype() == oxigraph::model::vocab::xsd::DECIMAL
                 || l.datatype() == oxigraph::model::vocab::xsd::DOUBLE
                 || l.datatype() == oxigraph::model::vocab::xsd::BOOLEAN

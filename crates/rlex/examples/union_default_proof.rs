@@ -64,14 +64,13 @@ fn main() -> Result<()> {
 }
 
 fn count(_store: &Store, results: QueryResults) -> Result<u64> {
-    if let QueryResults::Solutions(mut sols) = results {
-        if let Some(sol) = sols.next() {
+    if let QueryResults::Solutions(mut sols) = results
+        && let Some(sol) = sols.next() {
             let sol = sol?;
             if let Some(Term::Literal(lit)) = sol.get("n") {
                 return Ok(lit.value().parse().unwrap_or(0));
             }
         }
-    }
     Ok(0)
 }
 

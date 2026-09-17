@@ -110,7 +110,7 @@ fn main() -> Result<()> {
             let call = sol.get("call").map(|t| t.to_string()).unwrap_or_default();
             let src = sol.get("src").map(|t| t.to_string()).unwrap_or_default();
             let line = sol.get("line").map(|t| t.to_string()).unwrap_or_default();
-            let short_call = call.rsplit('#').last().unwrap_or(&call);
+            let short_call = call.rsplit('#').next_back().unwrap_or(&call);
             println!("{:<45} | {:<35} | {:<8}", short_call.trim_matches('>'), src.trim_matches('"'), line.trim_matches('"'));
         }
     }

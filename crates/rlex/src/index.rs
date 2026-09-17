@@ -69,6 +69,7 @@ pub fn sync_background(config: &Config) -> Result<()> {
 // -- Manifest data structures --
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct RepoManifest {
     #[serde(rename = "@id")]
     pub id: String,
@@ -81,6 +82,7 @@ pub struct RepoManifest {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct TrackedCommit {
     #[serde(rename = "@id")]
     pub id: String,
@@ -95,6 +97,7 @@ pub struct TrackedCommit {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct CommitManifest {
     #[serde(rename = "@id")]
     pub id: String,
@@ -195,6 +198,7 @@ pub fn read_commit_manifest(config: &Config, org: &str, repo: &str, hexsha: &str
 }
 
 /// Find a commit by tag name in a repo manifest
+#[allow(dead_code)]
 pub fn find_commit_by_tag(manifest: &RepoManifest, tag: &str) -> Option<TrackedCommit> {
     manifest
         .tracked_commits

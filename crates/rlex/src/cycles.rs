@@ -90,8 +90,8 @@ WHERE {{
 
         if let Ok(res) = client.query(&q_outgoing) {
             for row in res.rows {
-                if let Some(target_pkg) = row.first() {
-                    if let Some(target_repo) = registry::resolve_repo(target_pkg, Some(&config.paths.cache)) {
+                if let Some(target_pkg) = row.first()
+                    && let Some(target_repo) = registry::resolve_repo(target_pkg, Some(&config.paths.cache)) {
                         let q_reverse = format!(
                             r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
@@ -123,7 +123,6 @@ WHERE {{
                             }
                         }
                     }
-                }
             }
         }
     } else {
@@ -160,8 +159,8 @@ WHERE {{
                     r1.repo.to_lowercase()
                 );
 
-                if let Ok(res) = client.query(&q_check) {
-                    if let Some(row) = res.rows.first() {
+                if let Ok(res) = client.query(&q_check)
+                    && let Some(row) = res.rows.first() {
                         let c1 = row.first().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
                         let c2 = row.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
                         if c1 > 0 && c2 > 0 {
@@ -174,7 +173,6 @@ WHERE {{
                             });
                         }
                     }
-                }
             }
         }
     }
