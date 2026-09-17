@@ -3,7 +3,7 @@ use std::process::Command;
 
 use crate::config::Config;
 
-pub fn run(config: &Config, port: u16, sparql_port: u16, stop: bool) -> Result<()> {
+pub fn run(_config: &Config, port: u16, sparql_port: u16, stop: bool) -> Result<()> {
     if stop {
         // TODO: read pidfiles, kill both processes
         println!("Stopping viz + SPARQL servers...");

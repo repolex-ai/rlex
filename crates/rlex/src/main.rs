@@ -1,7 +1,11 @@
 use clap::{Parser, Subcommand};
 use anyhow::Result;
 
+mod audit;
+mod bench;
+mod calls;
 mod catalog;
+mod client;
 mod compaction;
 mod config;
 mod download;
@@ -100,6 +104,59 @@ enum Commands {
 
     /// Show current configuration
     Config,
+
+    /// Trace multi-hop inter-repo call graph traversals
+    Calls {
+        /// Source repository (e.g. actix-web, rlex, regex, socket2, flate2)
+        #[arg(short, long)]
+        from: String,
+
+        /// Target repository (e.g. memchr, proc-macro2, libc, miniz_oxide, crc32fast)
+        #[arg(short, long)]
+        to: String,
+
+        /// Explicit hop limit or count
+        #[arg(long)]
+        hops: Option<usize>,
+
+        /// Output format: ascii (default), table, json
+        #[arg(long, default_value = "ascii")]
+        format: String,
+
+        /// SPARQL endpoint URL (default: local store with fallback to http://localhost:7878/query)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+    },
+
+    /// Inspect Oxigraph store quad volume, repository inventory, and health
+    Audit {
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+
+        /// SPARQL endpoint URL (default: queries local store or background server)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+    },
+
+    /// Run automated multi-hop SPARQL benchmark suite and regression monitor
+    Bench {
+        /// SPARQL endpoint URL (default: http://localhost:7878/query or local store)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+
+        /// Number of timed iterations per benchmark profile
+        #[arg(short, long, default_value = "10")]
+        iterations: usize,
+
+        /// Benchmark suite: all, search-triad, macro-diamond, web-to-search, posix, compression
+        #[arg(short, long, default_value = "all")]
+        suite: String,
+
+        /// Output results as JSON for CI/CD tracking
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -289,7 +346,32 @@ fn main() -> Result<()> {
             let (org, name) = parse_repo(&repo)?;
             load::run(&config, org, name, commit.as_deref())?;
         }
-        Commands::Query { sparql, format, no_union } => { query::run(&config, &sparql, &format, !no_union)?; }
+        Commands::Query { sparql, format, no_union } => {
+            let query_str = if std::path::Path::new(&sparql).is_file() {
+                std::fs::read_to_string(&sparql)?
+            } else {
+                sparql
+            };
+            query::run(&config, &query_str, &format, !no_union)?;
+        }
+        Commands::Calls { from, to, hops, format, endpoint } => {
+            calls::run(
+                &config,
+                &calls::CallsOptions {
+                    from,
+                    to,
+                    hops,
+                    format,
+                    endpoint,
+                },
+            )?;
+        }
+        Commands::Audit { json, endpoint } => {
+            audit::run(&config, json, endpoint.as_deref())?;
+        }
+        Commands::Bench { endpoint, iterations, suite, json } => {
+            bench::run(&config, endpoint.as_deref(), iterations, &suite, json)?;
+        }
         Commands::Serve { port, viz_dir, stop, foreground, no_browser } => {
             if stop {
                 serve::stop(&config)?;

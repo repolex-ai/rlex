@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::index::{self, GraphFile};
+use crate::index;
 
 /// Download graph files for a specific commit of a repo.
 ///

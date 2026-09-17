@@ -86,7 +86,7 @@ pub fn background(config: &Config, port: u16, viz_dir: Option<&str>, open_browse
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     if open_browser {
-        if let Some(viz) = viz_dir {
+        if viz_dir.is_some() {
             println!("  opening browser...");
             let _ = open_url(&url);
         } else {

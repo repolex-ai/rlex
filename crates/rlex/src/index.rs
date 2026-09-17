@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::Config;

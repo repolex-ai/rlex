@@ -146,7 +146,7 @@ pub fn build_query(sparql: &str, union: bool) -> Result<Query> {
     Ok(query)
 }
 
-fn format_term(term: &oxigraph::model::Term) -> String {
+pub fn format_term(term: &oxigraph::model::Term) -> String {
     match term {
         oxigraph::model::Term::NamedNode(n) => {
             let iri = n.as_str();
@@ -198,6 +198,10 @@ fn compact_iri(iri: &str) -> String {
     }
 
     iri.to_string()
+}
+
+pub fn print_table_pub(headers: &[&str], rows: &[Vec<String>]) {
+    print_table(headers, rows);
 }
 
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
