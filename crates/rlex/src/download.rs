@@ -77,10 +77,43 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
         downloaded += graph_file.graph_file_size;
     }
 
-    let total = commit_manifest.graph_files.len();
+    // Fallback: Check if aggregate graphs exist in the storage repo even if omitted from manifest
+    let has_ast = commit_manifest.graph_files.iter().any(|g| g.graph_type == "ast");
+    let mut total = commit_manifest.graph_files.len();
+    if !has_ast {
+        let probe_paths = [
+            (format!("aggregate/ast/{}/chunk-001.nq.gz", commit.hexsha), "ast"),
+            (format!("aggregate/lsp/{}.nq.gz", commit.hexsha), "lsp"),
+            (format!("aggregate/repolex/{}/chunk-001.nq.gz", commit.hexsha), "repolex"),
+        ];
+
+        for (rel_path, g_type) in probe_paths {
+            let dest = cache_dir.join(&rel_path);
+            if dest.exists() {
+                total += 1;
+                skipped += 1;
+                continue;
+            }
+            let url = format!("{}/{}", base_url, rel_path);
+            if let Ok(resp) = client.head(&url).send() {
+                if resp.status().is_success() {
+                    total += 1;
+                    let content_len = resp.headers()
+                        .get(reqwest::header::CONTENT_LENGTH)
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    if download_file(&client, &url, &dest, g_type, content_len).is_ok() {
+                        downloaded += content_len;
+                    }
+                }
+            }
+        }
+    }
+
     println!(
         "Done. {} files downloaded ({:.1} MB), {} skipped (already cached).",
-        total - skipped,
+        total.saturating_sub(skipped),
         downloaded as f64 / 1_048_576.0,
         skipped
     );
