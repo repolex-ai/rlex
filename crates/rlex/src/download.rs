@@ -28,7 +28,10 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
             target, org, repo, org, repo
         ))?;
 
-    if commit.parse_status != "parsed" {
+    if commit.parse_status != "parsed"
+        && commit.parse_status != "ast_complete"
+        && commit.parse_status != "enrich_complete"
+    {
         bail!(
             "Commit {} ({}) is '{}', not yet parsed. Cannot download.",
             &commit.hexsha[..8],
@@ -96,16 +99,17 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
             }
             let url = format!("{}/{}", base_url, rel_path);
             if let Ok(resp) = client.head(&url).send() {
-                if resp.status().is_success() {
-                    total += 1;
-                    let content_len = resp.headers()
-                        .get(reqwest::header::CONTENT_LENGTH)
-                        .and_then(|h| h.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
-                    if download_file(&client, &url, &dest, g_type, content_len).is_ok() {
-                        downloaded += content_len;
-                    }
+                if !resp.status().is_success() {
+                    continue;
+                }
+                total += 1;
+                let content_len = resp.headers()
+                    .get(reqwest::header::CONTENT_LENGTH)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if download_file(&client, &url, &dest, g_type, content_len).is_ok() {
+                    downloaded += content_len;
                 }
             }
         }

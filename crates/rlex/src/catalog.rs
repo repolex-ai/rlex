@@ -18,7 +18,9 @@ pub fn generate(config: &Config) -> Result<()> {
                 let mut pending_count = 0u32;
 
                 for tc in &manifest.tracked_commits {
-                    let is_parsed = tc.parse_status == "parsed";
+                    let is_parsed = tc.parse_status == "parsed"
+                        || tc.parse_status == "ast_complete"
+                        || tc.parse_status == "enrich_complete";
                     if is_parsed {
                         parsed_count += 1;
                     } else {

@@ -265,6 +265,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Repos { query } => {
+            let is_parsed_status = |status: &str| matches!(status, "parsed" | "ast_complete" | "enrich_complete");
             let all_repos = index::list_repos(&config)?;
 
             if let Some(q) = query {
@@ -275,16 +276,16 @@ fn main() -> Result<()> {
                     let cache_dir = config.cache_path(org, name);
 
                     let parsed_count = manifest.tracked_commits.iter()
-                        .filter(|c| c.parse_status == "parsed").count();
+                        .filter(|c| is_parsed_status(&c.parse_status)).count();
                     let pending_count = manifest.tracked_commits.iter()
-                        .filter(|c| c.parse_status != "parsed").count();
+                        .filter(|c| !is_parsed_status(&c.parse_status)).count();
 
                     println!("{}/{}", org, name);
                     println!("  {} parsed, {} pending\n", parsed_count, pending_count);
 
                     // Parsed commits with cache status
                     let mut parsed: Vec<_> = manifest.tracked_commits.iter()
-                        .filter(|c| c.parse_status == "parsed")
+                        .filter(|c| is_parsed_status(&c.parse_status))
                         .collect();
                     parsed.sort_by(|a, b| a.parsed_at.cmp(&b.parsed_at));
 
@@ -327,7 +328,7 @@ fn main() -> Result<()> {
                     }
 
                     let pending: Vec<_> = manifest.tracked_commits.iter()
-                        .filter(|c| c.parse_status != "parsed")
+                        .filter(|c| !is_parsed_status(&c.parse_status))
                         .collect();
 
                     if !pending.is_empty() {
@@ -367,14 +368,14 @@ fn main() -> Result<()> {
                                 .ok()
                                 .map(|m| {
                                     let parsed = m.tracked_commits.iter()
-                                        .filter(|c| c.parse_status == "parsed").count();
+                                        .filter(|c| is_parsed_status(&c.parse_status)).count();
                                     let total = m.tracked_commits.len();
                                     let cached = config.cache_path(org, repo).exists()
                                         && std::fs::read_dir(config.cache_path(org, repo))
                                             .map(|d| d.count() > 0).unwrap_or(false);
                                     let cache_marker = if cached { " [cached]" } else { "" };
                                     format!("  ({}/{} parsed){}", parsed, total, cache_marker)
-                                })
+                                 })
                                 .unwrap_or_default();
                             println!("  {}/{}{}", org, repo, info);
                         }
@@ -388,7 +389,7 @@ fn main() -> Result<()> {
                         .ok()
                         .map(|m| {
                             let parsed = m.tracked_commits.iter()
-                                .filter(|c| c.parse_status == "parsed").count();
+                                .filter(|c| is_parsed_status(&c.parse_status)).count();
                             let total = m.tracked_commits.len();
                             let cached = config.cache_path(org, repo).exists()
                                 && std::fs::read_dir(config.cache_path(org, repo))
