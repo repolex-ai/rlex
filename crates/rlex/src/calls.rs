@@ -28,6 +28,10 @@ pub struct CallPathJson {
     pub hop_chain: Vec<String>,
     pub files: Vec<String>,
     pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lockfile_sha: Option<String>,
 }
 
 pub fn run(config: &Config, opts: &CallsOptions) -> Result<()> {
@@ -53,11 +57,19 @@ pub fn run(config: &Config, opts: &CallsOptions) -> Result<()> {
             } else {
                 vec![row[0].clone()]
             };
-            let target = row.last().cloned().unwrap_or_default();
+            let raw_target = row.last().cloned().unwrap_or_default();
+            let (canonical_target, lockfile_sha) = crate::equivalence::canonicalize_call_target(&raw_target);
+            let canonical_opt = if lockfile_sha.is_some() {
+                Some(canonical_target)
+            } else {
+                None
+            };
             paths.push(CallPathJson {
                 hop_chain: hop_chain.clone(),
                 files,
-                target,
+                target: raw_target,
+                canonical_target: canonical_opt,
+                lockfile_sha,
             });
         }
 
@@ -87,9 +99,17 @@ pub fn run(config: &Config, opts: &CallsOptions) -> Result<()> {
     }
 
     if opts.format == "table" {
-        // Table format
+        // Table format - display canonical targets for clarity
         let headers: Vec<&str> = res.vars.iter().map(|s| s.as_str()).collect();
-        crate::query::print_table_pub(&headers, &res.rows);
+        let display_rows: Vec<Vec<String>> = res.rows.iter().map(|row| {
+            let mut r = row.clone();
+            if let Some(last) = r.last_mut() {
+                let (canonical, _) = crate::equivalence::canonicalize_call_target(last);
+                *last = canonical;
+            }
+            r
+        }).collect();
+        crate::query::print_table_pub(&headers, &display_rows);
     } else {
         // ASCII tree format
         for (idx, row) in res.rows.iter().enumerate().take(10) {
@@ -103,7 +123,14 @@ pub fn run(config: &Config, opts: &CallsOptions) -> Result<()> {
                 println!("    └─ Source: {}", file);
             }
             if let Some(target) = row.last() {
-                println!("    └─ Target: {}", target);
+                let (canonical, lockfile_sha) = crate::equivalence::canonicalize_call_target(target);
+                if let Some(ref lockfile) = lockfile_sha {
+                    let short_lockfile = if lockfile.len() >= 7 { &lockfile[..7] } else { lockfile };
+                    println!("    └─ Target: {}", canonical);
+                    println!("       └─ [mapped from lockfile {}]", short_lockfile);
+                } else {
+                    println!("    └─ Target: {}", target);
+                }
             }
         }
         if res.rows.len() > 10 {
@@ -238,7 +265,7 @@ LIMIT 20
     if from.contains("rlex") && to.contains("proc-macro") {
         let q = r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
-SELECT ?rlexFile ?axumFile ?synTarget ?quoteTarget ?pmTarget
+SELECT ?rlexFile ?axumFile ?synFile ?quoteFile ?pmTarget
 WHERE {
   GRAPH <https://repolex.ai/r/repolex-ai/rlex/lsp/550a8e5a1a7b121bd970eff3e7575acd158f6bb8> {
     ?e1 lx:resolutionSourceFile ?rlexFile ;
@@ -249,12 +276,16 @@ WHERE {
         lx:externalPackage "syn" ;
         lx:callTarget ?synTarget .
   }
+  BIND(REPLACE(REPLACE(STR(?synTarget), '^.*commit/[^/]+/', ''), '#.*$', '') AS ?synFile)
   GRAPH <https://repolex.ai/r/dtolnay/syn/lsp/7bcb37cdb3399977658c8b52d2441d37e42e48f2> {
-    ?e3 lx:externalPackage "quote" ;
+    ?e3 lx:resolutionSourceFile ?synFile ;
+        lx:externalPackage "quote" ;
         lx:callTarget ?quoteTarget .
   }
+  BIND(REPLACE(REPLACE(STR(?quoteTarget), '^.*commit/[^/]+/', ''), '#.*$', '') AS ?quoteFile)
   GRAPH <https://repolex.ai/r/dtolnay/quote/lsp/842ffde933fdd76cd1681a288bed136d8b95a97a> {
-    ?e4 lx:externalPackage "proc-macro2" ;
+    ?e4 lx:resolutionSourceFile ?quoteFile ;
+        lx:externalPackage "proc-macro2" ;
         lx:callTarget ?pmTarget .
   }
 }
@@ -277,19 +308,23 @@ LIMIT 25
     if from.contains("axum") && to.contains("proc-macro") {
         let q = r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
-SELECT ?axumFile ?synTarget ?quoteTarget ?pmTarget
+SELECT ?axumFile ?synFile ?quoteFile ?pmTarget
 WHERE {
   GRAPH <https://repolex.ai/r/tokio-rs/axum/lsp/c59208c86fded335cd85e388030ad59347b0e5ae> {
     ?e1 lx:resolutionSourceFile ?axumFile ;
         lx:externalPackage "syn" ;
         lx:callTarget ?synTarget .
   }
+  BIND(REPLACE(REPLACE(STR(?synTarget), '^.*commit/[^/]+/', ''), '#.*$', '') AS ?synFile)
   GRAPH <https://repolex.ai/r/dtolnay/syn/lsp/7bcb37cdb3399977658c8b52d2441d37e42e48f2> {
-    ?e2 lx:externalPackage "quote" ;
+    ?e2 lx:resolutionSourceFile ?synFile ;
+        lx:externalPackage "quote" ;
         lx:callTarget ?quoteTarget .
   }
+  BIND(REPLACE(REPLACE(STR(?quoteTarget), '^.*commit/[^/]+/', ''), '#.*$', '') AS ?quoteFile)
   GRAPH <https://repolex.ai/r/dtolnay/quote/lsp/842ffde933fdd76cd1681a288bed136d8b95a97a> {
-    ?e3 lx:externalPackage "proc-macro2" ;
+    ?e3 lx:resolutionSourceFile ?quoteFile ;
+        lx:externalPackage "proc-macro2" ;
         lx:callTarget ?pmTarget .
   }
 }
@@ -385,14 +420,50 @@ WHERE {{
     ?e lx:resolutionSourceFile ?callerFile ;
        lx:externalPackage ?pkg ;
        lx:callTarget ?callTarget .
-    FILTER(CONTAINS(LCASE(STR(?pkg)), "{}"))
+    FILTER(LCASE(STR(?pkg)) = "{to}" || STRSTARTS(LCASE(STR(?pkg)), "{to}-") || STRSTARTS(LCASE(STR(?pkg)), "{to}_"))
   }}
 }}
 LIMIT 25
 "#,
-        source_graph, to
+        source_graph,
+        to = to
     );
 
     let hops = explicit_hops.unwrap_or(1);
     Ok((q, vec![from.to_string(), to.to_string()], hops))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_name() {
+        assert_eq!(normalize_name("tokio-rs/axum"), "axum");
+        assert_eq!(normalize_name("dtolnay/syn-rs"), "syn");
+        assert_eq!(normalize_name("rust-lang/git2-rs"), "git2");
+    }
+
+    #[test]
+    fn test_select_or_build_query_1hop_filter() {
+        let (q, chain, hops) = select_or_build_query("axum", "syn", None).expect("must build query");
+        assert_eq!(hops, 1);
+        assert_eq!(chain, vec!["axum", "syn"]);
+        // Ensure precise equality filter rather than loose CONTAINS
+        assert!(q.contains(r#"FILTER(LCASE(STR(?pkg)) = "syn""#));
+        assert!(!q.contains(r#"CONTAINS(LCASE(STR(?pkg)), "syn")"#));
+    }
+
+    #[test]
+    fn test_select_or_build_query_multihop_bridging() {
+        let (q, chain, hops) = select_or_build_query("axum", "proc-macro2", None).expect("must build query");
+        assert_eq!(hops, 3);
+        assert_eq!(chain, vec!["axum", "syn", "quote", "proc-macro2"]);
+        // Verify cross-commit file bridging BIND statements
+        assert!(q.contains("BIND(REPLACE(REPLACE(STR(?synTarget)"));
+        assert!(q.contains("BIND(REPLACE(REPLACE(STR(?quoteTarget)"));
+        assert!(q.contains("lx:resolutionSourceFile ?synFile"));
+        assert!(q.contains("lx:resolutionSourceFile ?quoteFile"));
+    }
+}
+

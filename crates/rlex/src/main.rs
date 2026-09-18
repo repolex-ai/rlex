@@ -12,6 +12,7 @@ mod config;
 mod cycles;
 mod diamond;
 mod download;
+mod equivalence;
 mod index;
 mod load;
 mod moreinfo;
