@@ -162,6 +162,10 @@ enum Commands {
         #[arg(long)]
         json: bool,
 
+        /// Post audit report as a GitHub commit comment (requires gh CLI or GH_TOKEN)
+        #[arg(long)]
+        comment: bool,
+
         /// SPARQL endpoint URL (default: queries local store or background server)
         #[arg(short, long)]
         endpoint: Option<String>,
@@ -518,6 +522,7 @@ fn main() -> Result<()> {
             commit,
             format,
             json,
+            comment,
             endpoint,
         } => {
             let target_repo = repo.or(repo_pos);
@@ -527,7 +532,7 @@ fn main() -> Result<()> {
                 } else {
                     format.as_deref().unwrap_or("markdown")
                 };
-                audit::run_repo_audit(&config, &target, commit.as_deref(), fmt, endpoint.as_deref())?;
+                audit::run_repo_audit(&config, &target, commit.as_deref(), fmt, endpoint.as_deref(), comment)?;
             } else {
                 audit::run(&config, json, endpoint.as_deref())?;
             }

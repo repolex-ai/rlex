@@ -314,6 +314,7 @@ pub fn run_repo_audit(
     commit_opt: Option<&str>,
     format: &str,
     endpoint: Option<&str>,
+    comment: bool,
 ) -> Result<()> {
     let t0 = Instant::now();
     let repo_ref = registry::resolve_repo_commit(repo_query, commit_opt, Some(&config.paths.cache))
@@ -633,7 +634,7 @@ SELECT (COUNT(?e) AS ?cnt) WHERE {{
         org: repo_ref.org.clone(),
         repo: repo_ref.repo.clone(),
         commit: repo_ref.commit.clone(),
-        short_sha,
+        short_sha: short_sha.clone(),
         latency_ms: elapsed_ms,
         graphs_present,
         total_quads,
@@ -651,16 +652,29 @@ SELECT (COUNT(?e) AS ?cnt) WHERE {{
         overall_status,
     };
 
+    let md_output = render_markdown_repo_audit(&report);
+
     match format {
         "json" => println!("{}", serde_json::to_string_pretty(&report)?),
         "ascii" => print_ascii_repo_audit(&report),
-        _ => print_markdown_repo_audit(&report),
+        _ => print!("{}", md_output),
+    }
+
+    if comment {
+        eprintln!("\nPosting audit report as GitHub commit comment to {}/{}@{}...", repo_ref.org, repo_ref.repo, short_sha);
+        match post_github_commit_comment(&repo_ref.org, &repo_ref.repo, &repo_ref.commit, &md_output) {
+            Ok(url) => println!("✓ GitHub commit comment posted: {}", url),
+            Err(e) => eprintln!("⚠ Failed to post commit comment: {}", e),
+        }
     }
 
     Ok(())
 }
 
-fn print_markdown_repo_audit(r: &RepoAuditReport) {
+pub fn render_markdown_repo_audit(r: &RepoAuditReport) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+
     let score_badge = if r.health_score >= 90 {
         "🟢"
     } else if r.health_score >= 70 {
@@ -669,100 +683,154 @@ fn print_markdown_repo_audit(r: &RepoAuditReport) {
         "🔴"
     };
 
-    println!("# 🛡️ Repolex Code & Architecture Audit: {}/{}", r.org, r.repo);
-    println!();
-    println!("> **Target:** `{}` | **Commit:** [`{}`](https://github.com/{}/{}/commit/{})", r.target, r.short_sha, r.org, r.repo, r.commit);
-    println!("> **Health Score:** {} **{}/100** · **Verdict:** {}", score_badge, r.health_score, r.overall_status);
-    println!("> **Query Latency:** {:.2} ms | **Verified Knowledge Quads:** {}", r.latency_ms, format_number(r.total_quads));
-    println!();
-    println!("---");
-    println!();
+    let _ = writeln!(out, "# 🛡️ Repolex Code & Architecture Audit: {}/{}", r.org, r.repo);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "> **Target:** `{}` | **Commit:** [`{}`](https://github.com/{}/{}/commit/{})", r.target, r.short_sha, r.org, r.repo, r.commit);
+    let _ = writeln!(out, "> **Health Score:** {} **{}/100** · **Verdict:** {}", score_badge, r.health_score, r.overall_status);
+    let _ = writeln!(out, "> **Query Latency:** {:.2} ms | **Verified Knowledge Quads:** {}", r.latency_ms, format_number(r.total_quads));
+    let _ = writeln!(out);
+    let _ = writeln!(out, "---");
+    let _ = writeln!(out);
 
-    println!("### 📊 Ingested Knowledge Graphs");
+    let _ = writeln!(out, "### 📊 Ingested Knowledge Graphs");
     if r.graphs_present.is_empty() {
-        println!("*No graph layers currently loaded in Oxigraph for this commit.*");
+        let _ = writeln!(out, "*No graph layers currently loaded in Oxigraph for this commit.*");
     } else {
-        println!("| Graph Layer | Verified Quads | Graph Named IRI |");
-        println!("|---|---|---|");
+        let _ = writeln!(out, "| Graph Layer | Verified Quads | Graph Named IRI |");
+        let _ = writeln!(out, "|---|---|---|");
         for g in &r.graphs_present {
-            println!("| **{}** | {:>10} | `{}` |", g.graph_type, format_number(g.quads), g.iri);
+            let _ = writeln!(out, "| **{}** | {:>10} | `{}` |", g.graph_type, format_number(g.quads), g.iri);
         }
     }
-    println!();
+    let _ = writeln!(out);
 
     if r.code_metrics.files_count > 0 || r.code_metrics.functions_count > 0 {
-        println!("### 📐 Codebase Scale & Syntax Analysis (AST)");
-        println!("| Architectural Metric | Measurement | Description |");
-        println!("|---|---|---|");
-        println!("| **Source Files** | **{}** | Total parsed source modules |", r.code_metrics.files_count);
-        println!("| **Function Items** | **{}** | Function and method definitions |", format_number(r.code_metrics.functions_count as u64));
-        println!("| **Data Types (Structs / Enums)** | **{} structs, {} enums** | Core data type declarations |", r.code_metrics.structs_count, r.code_metrics.enums_count);
-        println!("| **Implementation Blocks** | **{}** | Type implementation blocks (`impl`) |", r.code_metrics.impls_count);
-        println!("| **Macro Invocations** | **{}** | Macro expansion calls |", format_number(r.code_metrics.macros_count as u64));
-        println!("| **Call Expressions** | **{}** | Function invocation AST nodes |", format_number(r.code_metrics.calls_count as u64));
-        println!();
+        let _ = writeln!(out, "### 📐 Codebase Scale & Syntax Analysis (AST)");
+        let _ = writeln!(out, "| Architectural Metric | Measurement | Description |");
+        let _ = writeln!(out, "|---|---|---|");
+        let _ = writeln!(out, "| **Source Files** | **{}** | Total parsed source modules |", r.code_metrics.files_count);
+        let _ = writeln!(out, "| **Function Items** | **{}** | Function and method definitions |", format_number(r.code_metrics.functions_count as u64));
+        let _ = writeln!(out, "| **Data Types (Structs / Enums)** | **{} structs, {} enums** | Core data type declarations |", r.code_metrics.structs_count, r.code_metrics.enums_count);
+        let _ = writeln!(out, "| **Implementation Blocks** | **{}** | Type implementation blocks (`impl`) |", r.code_metrics.impls_count);
+        let _ = writeln!(out, "| **Macro Invocations** | **{}** | Macro expansion calls |", format_number(r.code_metrics.macros_count as u64));
+        let _ = writeln!(out, "| **Call Expressions** | **{}** | Function invocation AST nodes |", format_number(r.code_metrics.calls_count as u64));
+        let _ = writeln!(out);
     }
 
     if !r.top_modules.is_empty() {
-        println!("### 🏛️ Module Complexity & Density (Top Modules)");
-        println!("| Rank | Source File | Function Count | Relative Density |");
-        println!("|---|---|---|---|");
+        let _ = writeln!(out, "### 🏛️ Module Complexity & Density (Top Modules)");
+        let _ = writeln!(out, "| Rank | Source File | Function Count | Relative Density |");
+        let _ = writeln!(out, "|---|---|---|---|");
         let max_fn = r.top_modules.first().map(|m| m.function_count).unwrap_or(1).max(1);
         for (i, m) in r.top_modules.iter().enumerate() {
             let bar_len = (m.function_count * 15) / max_fn;
             let bar = "█".repeat(bar_len.max(1));
-            println!("| {:2} | `{}` | **{}** | `{}` |", i + 1, m.file_path, m.function_count, bar);
+            let _ = writeln!(out, "| {:2} | `{}` | **{}** | `{}` |", i + 1, m.file_path, m.function_count, bar);
         }
-        println!();
+        let _ = writeln!(out);
     }
 
     if !r.external_dependencies.is_empty() {
-        println!("### 📦 External Crate Invocations (LSP Call Graph)");
-        println!("| External Package | Invocation Callsites | Upstream Repository |");
-        println!("|---|---|---|");
+        let _ = writeln!(out, "### 📦 External Crate Invocations (LSP Call Graph)");
+        let _ = writeln!(out, "| External Package | Invocation Callsites | Upstream Repository |");
+        let _ = writeln!(out, "|---|---|---|");
         for dep in &r.external_dependencies {
             let upstream = r.declared_dependencies.iter()
                 .find(|d| d.package_name == dep.package_name)
                 .and_then(|d| d.github_repo.as_deref())
                 .unwrap_or("crates.io");
-            println!("| **{}** | {:>5} calls | `{}` |", dep.package_name, dep.call_count, upstream);
+            let _ = writeln!(out, "| **{}** | {:>5} calls | `{}` |", dep.package_name, dep.call_count, upstream);
         }
-        println!();
+        let _ = writeln!(out);
     } else if r.graphs_present.iter().any(|g| g.graph_type == "AST") && !r.graphs_present.iter().any(|g| g.graph_type == "LSP") {
-        println!("### 📦 External Crate Invocations");
-        println!("*LSP cross-repo resolution graph not yet generated for this commit (requires `forx enrich` step).*");
-        println!();
+        let _ = writeln!(out, "### 📦 External Crate Invocations");
+        let _ = writeln!(out, "*LSP cross-repo resolution graph not yet generated for this commit (requires `forx enrich` step).*");
+        let _ = writeln!(out);
     }
 
     if !r.declared_dependencies.is_empty() && r.external_dependencies.is_empty() {
-        println!("### 📦 Declared Dependencies (Cargo.toml)");
-        println!("| Package | Version | GitHub Repository |");
-        println!("|---|---|---|");
+        let _ = writeln!(out, "### 📦 Declared Dependencies (Cargo.toml)");
+        let _ = writeln!(out, "| Package | Version | GitHub Repository |");
+        let _ = writeln!(out, "|---|---|---|");
         for d in r.declared_dependencies.iter().take(12) {
             let ver = d.version.as_deref().unwrap_or("*");
             let repo = d.github_repo.as_deref().unwrap_or("-");
-            println!("| **{}** | `{}` | `{}` |", d.package_name, ver, repo);
+            let _ = writeln!(out, "| **{}** | `{}` | `{}` |", d.package_name, ver, repo);
         }
         if r.declared_dependencies.len() > 12 {
-            println!("| ... | ... | *and {} more packages* |", r.declared_dependencies.len() - 12);
+            let _ = writeln!(out, "| ... | ... | *and {} more packages* |", r.declared_dependencies.len() - 12);
         }
-        println!();
+        let _ = writeln!(out);
     }
 
-    println!("### 🔄 Directed Acyclic Graph (DAG) & Cycle Audit");
+    let _ = writeln!(out, "### 🔄 Directed Acyclic Graph (DAG) & Cycle Audit");
     if r.cycle_analysis.is_clean_dag {
-        println!("- **DAG Integrity:** ✅ **PASS** (Zero circular dependencies detected)");
-        println!("- **Internal Mutual Recursion:** None (All cross-file calls follow clean acyclic order)");
-        println!("- **Cross-Package Mutual Recursion:** None (No cyclic package coupling with upstream crates)");
+        let _ = writeln!(out, "- **DAG Integrity:** ✅ **PASS** (Zero circular dependencies detected)");
+        let _ = writeln!(out, "- **Internal Mutual Recursion:** None (All cross-file calls follow clean acyclic order)");
+        let _ = writeln!(out, "- **Cross-Package Mutual Recursion:** None (No cyclic package coupling with upstream crates)");
     } else {
-        println!("- **DAG Integrity:** ❌ **VIOLATIONS DETECTED**");
+        let _ = writeln!(out, "- **DAG Integrity:** ❌ **VIOLATIONS DETECTED**");
         for detail in &r.cycle_analysis.cycle_details {
-            println!("  - ⚠️ {}", detail);
+            let _ = writeln!(out, "  - ⚠️ {}", detail);
         }
     }
-    println!();
-    println!("---");
-    println!("*Report automatically generated by [repolex-ai/rlex](https://github.com/repolex-ai/rlex).*");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "---");
+    let _ = writeln!(out, "*Report automatically generated by [repolex-ai/rlex](https://github.com/repolex-ai/rlex).*");
+
+    out
+}
+
+fn post_github_commit_comment(org: &str, repo: &str, commit: &str, markdown: &str) -> Result<String> {
+    // 1. Try using gh CLI if available
+    let gh_check = std::process::Command::new("gh")
+        .args([
+            "api",
+            "--method", "POST",
+            "-H", "Accept: application/vnd.github+json",
+            &format!("/repos/{}/{}/commits/{}/comments", org, repo, commit),
+            "-f", &format!("body={}", markdown),
+            "--jq", ".html_url",
+        ])
+        .output();
+
+    if let Ok(output) = gh_check {
+        if output.status.success() {
+            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !url.is_empty() {
+                return Ok(url);
+            }
+        }
+    }
+
+    // 2. Fallback to reqwest with GITHUB_TOKEN or GH_TOKEN
+    let token = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN"))
+        .map_err(|_| anyhow::anyhow!("Neither `gh` CLI nor GITHUB_TOKEN/GH_TOKEN is configured"))?;
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("repolex-audit/0.1.0")
+        .build()?;
+
+    let url = format!("https://api.github.com/repos/{}/{}/commits/{}/comments", org, repo, commit);
+    let resp = client.post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/vnd.github+json")
+        .json(&serde_json::json!({ "body": markdown }))
+        .send()?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        anyhow::bail!("GitHub API request failed (HTTP {}): {}", status, body);
+    }
+
+    let json_resp: serde_json::Value = resp.json()?;
+    let comment_url = json_resp.get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&url)
+        .to_string();
+
+    Ok(comment_url)
 }
 
 fn print_ascii_repo_audit(r: &RepoAuditReport) {
