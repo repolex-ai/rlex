@@ -21,6 +21,16 @@ impl RepoRef {
     pub fn ast_graph(&self) -> String {
         format!("https://repolex.ai/r/{}/{}/ast/{}", self.org, self.repo, self.commit)
     }
+
+    #[allow(dead_code)]
+    pub fn repolex_graph(&self) -> String {
+        format!("https://repolex.ai/r/{}/{}/repolex/{}", self.org, self.repo, self.commit)
+    }
+
+    #[allow(dead_code)]
+    pub fn filetree_graph(&self) -> String {
+        format!("https://repolex.ai/r/{}/{}/filetree/{}", self.org, self.repo, self.commit)
+    }
 }
 
 const BACKBONE: &[(&str, &str, &str, &str)] = &[
@@ -52,38 +62,46 @@ const BACKBONE: &[(&str, &str, &str, &str)] = &[
     ("hyper", "hyperium", "hyper", "0d6c7d5469baa09e2fb127ee3758a79b3271a4f0"),
     ("reqwest", "seanmonstar", "reqwest", "ad83b63824385a4e5758d263db707549bbe59ba7"),
     ("ruby", "ruby", "ruby", "995b59f66677d44767ce9faac6957e5543617ff9"),
+    ("pan", "repolex-ai", "pan", "d92f3db1f1b1a997d6290d1208e231d9e455c9d8"),
     ("jquery", "jquery", "jquery", "4dec426aa2a6cbabb1b064319ba7c272d594a688"),
 ];
 
 /// Resolve a repository query string (e.g. "syn", "regex", "dtolnay/syn")
 /// to a RepoRef using known backbone mappings and local cache fallbacks.
 pub fn resolve_repo(query: &str, cache_root: Option<&Path>) -> Option<RepoRef> {
+    resolve_repo_commit(query, None, cache_root)
+}
+
+/// Resolve a repository query string and optional commit SHA to a RepoRef.
+pub fn resolve_repo_commit(query: &str, commit_opt: Option<&str>, cache_root: Option<&Path>) -> Option<RepoRef> {
     let q = query.trim().to_lowercase();
     let clean = q.replace("-rs", "").replace("_rs", "");
 
     // 1. Check backbone table
-    for (alias, org, repo, commit) in BACKBONE {
+    for (alias, org, repo, default_commit) in BACKBONE {
         if q == *alias || clean == *alias || q == format!("{}/{}", org, repo).to_lowercase() {
+            let commit = commit_opt.unwrap_or(default_commit).to_string();
             return Some(RepoRef {
                 org: org.to_string(),
                 repo: repo.to_string(),
-                commit: commit.to_string(),
+                commit,
             });
         }
     }
 
     // 2. Partial match on backbone
-    for (alias, org, repo, commit) in BACKBONE {
+    for (alias, org, repo, default_commit) in BACKBONE {
         if alias.contains(&clean) || clean.contains(alias) {
+            let commit = commit_opt.unwrap_or(default_commit).to_string();
             return Some(RepoRef {
                 org: org.to_string(),
                 repo: repo.to_string(),
-                commit: commit.to_string(),
+                commit,
             });
         }
     }
 
-    // 3. Dynamic search in ~/.rlex/cache if path provided
+    // 3. Dynamic search in cache if path provided
     if let Some(cache_dir) = cache_root
         && cache_dir.exists()
             && let Ok(org_entries) = std::fs::read_dir(cache_dir) {
@@ -94,17 +112,51 @@ pub fn resolve_repo(query: &str, cache_root: Option<&Path>) -> Option<RepoRef> {
                             let repo_name = repo_entry.file_name().to_string_lossy().to_string();
                             let full_name = format!("{}/{}", org_name, repo_name).to_lowercase();
                             if full_name.contains(&clean) || repo_name.to_lowercase().contains(&clean) {
-                                // Find commit dir
                                 if let Ok(commits) = std::fs::read_dir(repo_entry.path()) {
+                                    let mut commit_dirs = Vec::new();
                                     for c in commits.flatten() {
                                         if c.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                                            let commit_sha = c.file_name().to_string_lossy().to_string();
+                                            let c_sha = c.file_name().to_string_lossy().to_string();
+                                            commit_dirs.push((c_sha, c.path()));
+                                        }
+                                    }
+
+                                    // If user specified a commit, find matching prefix
+                                    if let Some(req_sha) = commit_opt {
+                                        for (c_sha, _) in &commit_dirs {
+                                            if c_sha.starts_with(req_sha) || req_sha.starts_with(c_sha) {
+                                                return Some(RepoRef {
+                                                    org: org_name,
+                                                    repo: repo_name,
+                                                    commit: c_sha.clone(),
+                                                });
+                                            }
+                                        }
+                                        // Fallback if not cached yet: use requested sha
+                                        return Some(RepoRef {
+                                            org: org_name,
+                                            repo: repo_name,
+                                            commit: req_sha.to_string(),
+                                        });
+                                    }
+
+                                    // If multiple commits, prioritize one with lsp or ast
+                                    for (c_sha, c_path) in &commit_dirs {
+                                        if c_path.join("lsp").exists() || c_path.join("dep").exists() {
                                             return Some(RepoRef {
                                                 org: org_name,
                                                 repo: repo_name,
-                                                commit: commit_sha,
+                                                commit: c_sha.clone(),
                                             });
                                         }
+                                    }
+
+                                    if let Some((c_sha, _)) = commit_dirs.first() {
+                                        return Some(RepoRef {
+                                            org: org_name,
+                                            repo: repo_name,
+                                            commit: c_sha.clone(),
+                                        });
                                     }
                                 }
                             }

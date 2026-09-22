@@ -139,8 +139,25 @@ enum Commands {
         endpoint: Option<String>,
     },
 
-    /// Inspect Oxigraph store quad volume, repository inventory, and health
+    /// Inspect Oxigraph store quad volume, repository inventory, or audit a specific repository
     Audit {
+        /// Target repository to audit (e.g. pan, git-lex, repolex-ai/pan).
+        /// If omitted, audits global triplestore health.
+        #[arg(value_name = "REPO")]
+        repo_pos: Option<String>,
+
+        /// Target repository to audit (named option: --repo pan)
+        #[arg(short, long, value_name = "REPO")]
+        repo: Option<String>,
+
+        /// Specific commit SHA (prefix or full SHA). Defaults to latest cached/loaded commit.
+        #[arg(short, long)]
+        commit: Option<String>,
+
+        /// Output format: markdown (default for repo), ascii, json
+        #[arg(short, long)]
+        format: Option<String>,
+
         /// Emit structured JSON output
         #[arg(long)]
         json: bool,
@@ -495,8 +512,25 @@ fn main() -> Result<()> {
         Commands::Moreinfo { topic, json } => {
             moreinfo::run(topic.as_deref(), json)?;
         }
-        Commands::Audit { json, endpoint } => {
-            audit::run(&config, json, endpoint.as_deref())?;
+        Commands::Audit {
+            repo_pos,
+            repo,
+            commit,
+            format,
+            json,
+            endpoint,
+        } => {
+            let target_repo = repo.or(repo_pos);
+            if let Some(target) = target_repo {
+                let fmt = if json {
+                    "json"
+                } else {
+                    format.as_deref().unwrap_or("markdown")
+                };
+                audit::run_repo_audit(&config, &target, commit.as_deref(), fmt, endpoint.as_deref())?;
+            } else {
+                audit::run(&config, json, endpoint.as_deref())?;
+            }
         }
         Commands::Bench { endpoint, iterations, suite, json } => {
             bench::run(&config, endpoint.as_deref(), iterations, &suite, json)?;
