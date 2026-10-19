@@ -15,18 +15,28 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
     // Read repo manifest to find the commit
     let repo_manifest = index::read_repo_manifest(config, org, repo)?;
 
-    // Target can be a tag name or a commit sha (prefix match)
-    let commit = repo_manifest
-        .tracked_commits
-        .iter()
-        .find(|c| {
-            c.tag_name.as_deref() == Some(target)
-                || c.hexsha.starts_with(target)
-        })
-        .ok_or_else(|| anyhow::anyhow!(
-            "No commit matching '{}' in {}/{}. Use `rlex repos {}/{}` to see available tags.",
-            target, org, repo, org, repo
-        ))?;
+    // Target can be "HEAD" (latest parsed commit), a tag name, or a commit sha (prefix match)
+    let is_parsed = |s: &str| matches!(s, "parsed" | "ast_complete" | "enrich_complete");
+    let commit = if target.eq_ignore_ascii_case("HEAD") {
+        repo_manifest
+            .tracked_commits
+            .iter()
+            .filter(|c| is_parsed(&c.parse_status))
+            .max_by_key(|c| c.parsed_at.as_deref().unwrap_or(""))
+            .or_else(|| repo_manifest.tracked_commits.first())
+    } else {
+        repo_manifest
+            .tracked_commits
+            .iter()
+            .find(|c| {
+                c.tag_name.as_deref() == Some(target)
+                    || c.hexsha.starts_with(target)
+            })
+    }
+    .ok_or_else(|| anyhow::anyhow!(
+        "No commit matching '{}' in {}/{}. Use `rlex repos {}/{}` to see available tags.",
+        target, org, repo, org, repo
+    ))?;
 
     if commit.parse_status != "parsed"
         && commit.parse_status != "ast_complete"
@@ -53,6 +63,7 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
         "https://github.com/{}/{}/raw/main",
         config.data_storage_org, forx_repo
     );
+    let repo_clone_dir = config.paths.repos.join(&config.data_storage_org).join(&forx_repo);
 
     println!(
         "Downloading {}/{} @ {} ({})...",
@@ -76,7 +87,9 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
         }
 
         let url = format!("{}/{}", base_url, graph_file.graph_file_path);
-        download_file(&client, &url, &dest, &graph_file.graph_type, graph_file.graph_file_size)?;
+        if download_file(&client, &url, &dest, &graph_file.graph_type, graph_file.graph_file_size).is_err() {
+            copy_from_git_clone(&config.data_storage_org, &forx_repo, &repo_clone_dir, &graph_file.graph_file_path, &dest)?;
+        }
         downloaded += graph_file.graph_file_size;
     }
 
@@ -99,17 +112,28 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
             }
             let url = format!("{}/{}", base_url, rel_path);
             if let Ok(resp) = client.head(&url).send() {
-                if !resp.status().is_success() {
+                if resp.status().is_success() {
+                    total += 1;
+                    let content_len = resp.headers()
+                        .get(reqwest::header::CONTENT_LENGTH)
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    if download_file(&client, &url, &dest, g_type, content_len).is_ok() {
+                        downloaded += content_len;
+                    }
                     continue;
                 }
-                total += 1;
-                let content_len = resp.headers()
-                    .get(reqwest::header::CONTENT_LENGTH)
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if download_file(&client, &url, &dest, g_type, content_len).is_ok() {
-                    downloaded += content_len;
+            }
+            // Also check local git clone if private repo was cloned
+            let src = repo_clone_dir.join(&rel_path);
+            if src.exists() {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if let Ok(bytes) = fs::copy(&src, &dest) {
+                    total += 1;
+                    downloaded += bytes;
                 }
             }
         }
@@ -124,6 +148,42 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
     println!("Cache: {}", cache_dir.display());
 
     Ok(commit.hexsha.clone())
+}
+
+fn copy_from_git_clone(
+    data_storage_org: &str,
+    forx_repo: &str,
+    repo_clone_dir: &PathBuf,
+    rel_path: &str,
+    dest: &PathBuf,
+) -> Result<()> {
+    if !repo_clone_dir.join(".git").exists() {
+        if let Some(parent) = repo_clone_dir.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let repo_url = format!("https://github.com/{}/{}.git", data_storage_org, forx_repo);
+        let output = std::process::Command::new("git")
+            .args(["clone", "--depth", "1", &repo_url, &repo_clone_dir.to_string_lossy()])
+            .output()
+            .context("running git clone for data repo")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git clone failed: {}", stderr.trim());
+        }
+    } else {
+        let _ = std::process::Command::new("git")
+            .args(["pull", "--ff-only"])
+            .current_dir(repo_clone_dir)
+            .output();
+    }
+    let src = repo_clone_dir.join(rel_path);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&src, dest)
+        .with_context(|| format!("copying {} from git clone", rel_path))?;
+    println!("ok (via git)");
+    Ok(())
 }
 
 fn download_file(
@@ -147,7 +207,6 @@ fn download_file(
         .with_context(|| format!("fetching {}", url))?;
 
     if !response.status().is_success() {
-        println!("FAILED ({})", response.status());
         bail!("Download failed for {}: HTTP {}", url, response.status());
     }
 

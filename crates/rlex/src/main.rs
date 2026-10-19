@@ -45,11 +45,12 @@ enum Commands {
         query: Option<String>,
     },
 
-    /// Download graph data for a repo at a specific tag or commit
+    /// Download graph data for a repo at a specific tag or commit (default: HEAD)
     Download {
         /// Repository in org/repo format
         repo: String,
-        /// Tag name or commit sha
+        /// Tag name or commit sha (default: HEAD)
+        #[arg(default_value = "HEAD")]
         target: String,
         /// Graph types to download (default: all)
         #[arg(short, long)]
