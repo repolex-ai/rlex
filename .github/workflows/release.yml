@@ -2,7 +2,7 @@ name: Release
 
 # Builds ready-to-run rlex binaries and attaches them to a GitHub release, so
 # install.sh can install rlex without Rust or a compiler.
-# Run it by pushing a tag: git tag v0.1.1 && git push origin v0.1.1
+# Run it by pushing a tag: git tag v0.1.2 && git push origin v0.1.2
 
 on:
   push:
@@ -55,4 +55,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" dist/*.tar.gz --repo "$GITHUB_REPOSITORY" --title "rlex $TAG" --notes "Install: curl -fsSL https://raw.githubusercontent.com/repolex-ai/rlex/main/install.sh | sh"
+        run: |
+          gh release create "$TAG" dist/*.tar.gz --repo "$GITHUB_REPOSITORY" --title "rlex $TAG" \
+            --notes "Install with: curl -fsSL https://raw.githubusercontent.com/repolex-ai/rlex/main/install.sh | sh"
