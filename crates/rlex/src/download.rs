@@ -8,12 +8,15 @@ use crate::index;
 
 /// Download graph files for a specific commit of a repo.
 ///
+/// Everything comes from the data repo {data_storage_org}/{org}--{repo} itself
+/// (manifests included); forx-index is not needed.
 /// Files land in ~/.rlex/cache/{org}/{repo}/{hexsha}/
-/// Download URLs: https://github.com/repolex-forx/{org}--{repo}/raw/main/{graphFilePath}
+/// Download URLs: https://github.com/{data_storage_org}/{org}--{repo}/raw/main/{graphFilePath}
 /// Returns the hexsha of the downloaded commit.
 pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<String> {
     // Read repo manifest to find the commit
-    let repo_manifest = index::read_repo_manifest(config, org, repo)?;
+    let repo_manifest: index::RepoManifest =
+        read_data_repo_json(config, org, repo, "repo-manifest.jsonld")?;
 
     // Target can be "HEAD" (latest parsed commit), a tag name, or a commit sha (prefix match)
     let is_parsed = |s: &str| matches!(s, "parsed" | "ast_complete" | "enrich_complete");
@@ -51,7 +54,12 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
     }
 
     // Read the commit manifest for file details
-    let commit_manifest = index::read_commit_manifest(config, org, repo, &commit.hexsha)?;
+    let commit_manifest: index::CommitManifest = read_data_repo_json(
+        config,
+        org,
+        repo,
+        &format!("manifests/commit-manifest-{}.jsonld", commit.hexsha),
+    )?;
 
     let cache_dir = config.cache_path(org, repo).join(&commit.hexsha);
     fs::create_dir_all(&cache_dir)
@@ -150,6 +158,42 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
     Ok(commit.hexsha.clone())
 }
 
+/// Read a JSON file from the data repo {data_storage_org}/{org}--{repo}:
+/// a plain download first (public repos), then a git clone with the user's
+/// own git credentials (private repos).
+fn read_data_repo_json<T: serde::de::DeserializeOwned>(
+    config: &Config,
+    org: &str,
+    repo: &str,
+    rel_path: &str,
+) -> Result<T> {
+    let forx_repo = format!("{}--{}", org, repo);
+    let url = format!(
+        "https://github.com/{}/{}/raw/main/{}",
+        config.data_storage_org, forx_repo, rel_path
+    );
+    if let Ok(resp) = reqwest::blocking::get(&url) {
+        if resp.status().is_success() {
+            if let Ok(parsed) = resp.text().map_err(anyhow::Error::from)
+                .and_then(|t| serde_json::from_str(&t).map_err(anyhow::Error::from))
+            {
+                return Ok(parsed);
+            }
+        }
+    }
+
+    let clone_dir = config.paths.repos.join(&config.data_storage_org).join(&forx_repo);
+    ensure_clone(&config.data_storage_org, &forx_repo, &clone_dir)?;
+    let path = clone_dir.join(rel_path);
+    let contents = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "{} not found in {}/{}. Has {}/{} been parsed?",
+            rel_path, config.data_storage_org, forx_repo, org, repo
+        )
+    })?;
+    serde_json::from_str(&contents).with_context(|| format!("parsing {}", path.display()))
+}
+
 fn copy_from_git_clone(
     data_storage_org: &str,
     forx_repo: &str,
@@ -157,6 +201,19 @@ fn copy_from_git_clone(
     rel_path: &str,
     dest: &PathBuf,
 ) -> Result<()> {
+    ensure_clone(data_storage_org, forx_repo, repo_clone_dir)?;
+    let src = repo_clone_dir.join(rel_path);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&src, dest)
+        .with_context(|| format!("copying {} from git clone", rel_path))?;
+    println!("ok (via git)");
+    Ok(())
+}
+
+/// Shallow-clone the data repo, or fast-forward an existing clone.
+fn ensure_clone(data_storage_org: &str, forx_repo: &str, repo_clone_dir: &PathBuf) -> Result<()> {
     if !repo_clone_dir.join(".git").exists() {
         if let Some(parent) = repo_clone_dir.parent() {
             fs::create_dir_all(parent)?;
@@ -176,13 +233,6 @@ fn copy_from_git_clone(
             .current_dir(repo_clone_dir)
             .output();
     }
-    let src = repo_clone_dir.join(rel_path);
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(&src, dest)
-        .with_context(|| format!("copying {} from git clone", rel_path))?;
-    println!("ok (via git)");
     Ok(())
 }
 

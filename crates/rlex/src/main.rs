@@ -280,10 +280,13 @@ fn main() -> Result<()> {
     config.data_storage_org = cli.data_storage_org;
     config.ensure_dirs()?;
 
-    // Lazy background sync of forx-index on every command (non-blocking)
-    // Skip if user is running sync explicitly to avoid concurrent pulls
-    if !matches!(cli.command, Commands::Sync) {
-        index::sync_background(&config)?;
+    // Lazy background sync of forx-index (non-blocking, best effort).
+    // Skip for `sync` (avoids concurrent pulls) and `download` (reads the
+    // data repo directly; an org may have no forx-index at all).
+    if !matches!(cli.command, Commands::Sync | Commands::Download { .. }) {
+        if let Err(e) = index::sync_background(&config) {
+            eprintln!("note: forx-index sync skipped: {e}");
+        }
     }
 
     match cli.command {
