@@ -47,11 +47,11 @@ pub fn run(config: &Config, org: &str, repo: &str, target: &str) -> Result<Strin
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("creating cache dir {}", cache_dir.display()))?;
 
-    // forx repo name uses -- separator: repolex-forx/{org}--{repo}
+    // storage repo name uses -- separator: {data_storage_org}/{org}--{repo}
     let forx_repo = format!("{}--{}", org, repo);
     let base_url = format!(
-        "https://github.com/repolex-forx/{}/raw/main",
-        forx_repo
+        "https://github.com/{}/{}/raw/main",
+        config.data_storage_org, forx_repo
     );
 
     println!(

@@ -7,6 +7,12 @@ use std::path::PathBuf;
 pub struct Config {
     pub paths: PathsConfig,
     pub server: ServerConfig,
+    #[serde(skip, default = "default_data_storage_org")]
+    pub data_storage_org: String,
+}
+
+fn default_data_storage_org() -> String {
+    "repolex-forx".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,6 +49,7 @@ impl Default for Config {
                 sparql_port: 7878,
                 viz_port: 3000,
             },
+            data_storage_org: default_data_storage_org(),
         }
     }
 }
@@ -104,8 +111,8 @@ impl Config {
         self.paths.repos.join(org).join(repo)
     }
 
-    /// Path to the forx-index clone
+    /// Path to the forx-index clone for the active data_storage_org
     pub fn forx_index_path(&self) -> PathBuf {
-        self.repo_path("repolex-forx", "forx-index")
+        self.repo_path(&self.data_storage_org, "forx-index")
     }
 }

@@ -5,11 +5,10 @@ use std::process::Command;
 
 use crate::config::Config;
 
-const FORX_INDEX_URL: &str = "https://github.com/repolex-forx/forx-index.git";
-
 /// Clone or pull the forx-index repo
 pub fn sync(config: &Config) -> Result<()> {
     let index_path = config.forx_index_path();
+    let index_url = format!("https://github.com/{}/forx-index.git", config.data_storage_org);
 
     if index_path.join(".git").exists() {
         println!("Pulling forx-index...");
@@ -30,7 +29,7 @@ pub fn sync(config: &Config) -> Result<()> {
             .context("creating repos directory")?;
 
         let output = Command::new("git")
-            .args(["clone", FORX_INDEX_URL, &index_path.to_string_lossy()])
+            .args(["clone", &index_url, &index_path.to_string_lossy()])
             .output()
             .context("running git clone")?;
 

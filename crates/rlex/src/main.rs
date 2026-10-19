@@ -26,6 +26,10 @@ mod warmup;
 #[derive(Parser)]
 #[command(name = "rlex", about = "SPARQL query tool for repolex knowledge graphs")]
 struct Cli {
+    /// GitHub organization where parsed data is stored
+    #[arg(long, global = true, default_value = "repolex-forx")]
+    data_storage_org: String,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -271,7 +275,8 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = config::Config::load()?;
+    let mut config = config::Config::load()?;
+    config.data_storage_org = cli.data_storage_org;
     config.ensure_dirs()?;
 
     // Lazy background sync of forx-index on every command (non-blocking)
