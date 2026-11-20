@@ -13,6 +13,7 @@ mod cycles;
 mod diamond;
 mod download;
 mod equivalence;
+mod filter;
 mod index;
 mod load;
 mod moreinfo;
@@ -142,6 +143,14 @@ enum Commands {
         /// SPARQL endpoint URL (default: local store with fallback to http://localhost:7878/query)
         #[arg(short, long)]
         endpoint: Option<String>,
+
+        /// Include test files/targets (default: prod-only)
+        #[arg(long, default_value_t = false)]
+        include_tests: bool,
+
+        /// Include benchmark files/targets (default: prod-only)
+        #[arg(long, default_value_t = false)]
+        include_benches: bool,
     },
 
     /// Inspect Oxigraph store quad volume, repository inventory, or audit a specific repository
@@ -216,6 +225,14 @@ enum Commands {
         /// SPARQL endpoint URL (default: local store or http://localhost:7878/query)
         #[arg(short, long)]
         endpoint: Option<String>,
+
+        /// Include test files/targets (default: prod-only)
+        #[arg(long, default_value_t = false)]
+        include_tests: bool,
+
+        /// Include benchmark files/targets (default: prod-only)
+        #[arg(long, default_value_t = false)]
+        include_benches: bool,
     },
 
     /// Solve diamond dependency convergence patterns across multiple branches
@@ -235,6 +252,14 @@ enum Commands {
         /// SPARQL endpoint URL (default: local store or http://localhost:7878/query)
         #[arg(short, long)]
         endpoint: Option<String>,
+
+        /// Include test files/targets (default: prod-only)
+        #[arg(long, default_value_t = false)]
+        include_tests: bool,
+
+        /// Include benchmark files/targets (default: prod-only)
+        #[arg(long, default_value_t = false)]
+        include_benches: bool,
     },
 
     /// Detect cyclic dependencies and mutual recursion patterns
@@ -250,6 +275,14 @@ enum Commands {
         /// SPARQL endpoint URL (default: local store or http://localhost:7878/query)
         #[arg(short, long)]
         endpoint: Option<String>,
+
+        /// Include test files/targets (default: prod-only)
+        #[arg(long, default_value_t = false)]
+        include_tests: bool,
+
+        /// Include benchmark files/targets (default: prod-only)
+        #[arg(long, default_value_t = false)]
+        include_benches: bool,
     },
 
     /// Pre-warm RocksDB SST index and bloom filter blocks for core ecosystem graphs
@@ -442,22 +475,44 @@ fn main() -> Result<()> {
         }
 
         Commands::Cache => {
+            use std::io::Write;
             let cached = download::list_cached(&config)?;
+            let mut out = std::io::stdout().lock();
             if cached.is_empty() {
-                println!("Cache is empty. Use `rlex download org/repo tag` to download data.");
+                if let Err(e) = writeln!(out, "Cache is empty. Use `rlex download org/repo tag` to download data.") {
+                    if e.kind() == std::io::ErrorKind::BrokenPipe {
+                        return Ok(());
+                    }
+                    return Err(e.into());
+                }
                 return Ok(());
             }
 
-            println!("Cached data:\n");
+            let write_line = |out: &mut std::io::StdoutLock<'_>, line: &str| -> Result<bool> {
+                match writeln!(out, "{line}") {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+                    Err(e) => Err(e.into()),
+                }
+            };
+
+            if !write_line(&mut out, "Cached data:\n")? {
+                return Ok(());
+            }
             for repo in &cached {
-                println!("  {}/{}:", repo.org, repo.repo);
+                if !write_line(&mut out, &format!("  {}/{}:", repo.org, repo.repo))? {
+                    return Ok(());
+                }
                 for commit in &repo.commits {
-                    println!(
+                    let line = format!(
                         "    {} — {} files, {:.1} MB",
                         &commit.hexsha[..8.min(commit.hexsha.len())],
                         commit.file_count,
                         commit.total_size as f64 / 1_048_576.0
                     );
+                    if !write_line(&mut out, &line)? {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -474,7 +529,7 @@ fn main() -> Result<()> {
             };
             query::run(&config, &query_str, &format, !no_union, strict_scan_guard)?;
         }
-        Commands::Calls { from, to, hops, format, endpoint } => {
+        Commands::Calls { from, to, hops, format, endpoint, include_tests, include_benches } => {
             calls::run(
                 &config,
                 &calls::CallsOptions {
@@ -483,10 +538,14 @@ fn main() -> Result<()> {
                     hops,
                     format,
                     endpoint,
+                    filter: filter::ScopeFilter {
+                        include_tests,
+                        include_benches,
+                    },
                 },
             )?;
         }
-        Commands::Closure { from, to, depth, format, endpoint } => {
+        Commands::Closure { from, to, depth, format, endpoint, include_tests, include_benches } => {
             closure::run(
                 &config,
                 &closure::ClosureOptions {
@@ -495,10 +554,14 @@ fn main() -> Result<()> {
                     max_depth: depth,
                     format,
                     endpoint,
+                    filter: filter::ScopeFilter {
+                        include_tests,
+                        include_benches,
+                    },
                 },
             )?;
         }
-        Commands::Diamond { from, to, format, endpoint } => {
+        Commands::Diamond { from, to, format, endpoint, include_tests, include_benches } => {
             diamond::run(
                 &config,
                 &diamond::DiamondOptions {
@@ -506,16 +569,24 @@ fn main() -> Result<()> {
                     to,
                     format,
                     endpoint,
+                    filter: filter::ScopeFilter {
+                        include_tests,
+                        include_benches,
+                    },
                 },
             )?;
         }
-        Commands::Cycles { repo, format, endpoint } => {
+        Commands::Cycles { repo, format, endpoint, include_tests, include_benches } => {
             cycles::run(
                 &config,
                 &cycles::CyclesOptions {
                     repo,
                     format,
                     endpoint,
+                    filter: filter::ScopeFilter {
+                        include_tests,
+                        include_benches,
+                    },
                 },
             )?;
         }

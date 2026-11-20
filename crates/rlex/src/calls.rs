@@ -1,9 +1,12 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde::Serialize;
+use std::path::Path;
 use std::time::Instant;
 
 use crate::client::Client;
 use crate::config::Config;
+use crate::filter::ScopeFilter;
+use crate::registry;
 
 pub struct CallsOptions {
     pub from: String,
@@ -11,6 +14,7 @@ pub struct CallsOptions {
     pub hops: Option<usize>,
     pub format: String,
     pub endpoint: Option<String>,
+    pub filter: ScopeFilter,
 }
 
 #[derive(Debug, Serialize)]
@@ -18,6 +22,7 @@ pub struct CallsResultJson {
     pub from: String,
     pub to: String,
     pub hops: usize,
+    pub scope: String,
     pub latency_ms: f64,
     pub path_count: usize,
     pub paths: Vec<CallPathJson>,
@@ -40,7 +45,13 @@ pub fn run(config: &Config, opts: &CallsOptions) -> Result<()> {
     let from_norm = normalize_name(&opts.from);
     let to_norm = normalize_name(&opts.to);
 
-    let (sparql, hop_chain, hop_count) = select_or_build_query(&from_norm, &to_norm, opts.hops)?;
+    let (sparql, hop_chain, hop_count) = select_or_build_query(
+        &from_norm,
+        &to_norm,
+        opts.hops,
+        opts.filter,
+        Some(&config.paths.cache),
+    )?;
 
     let t0 = Instant::now();
     let res = client.query(&sparql)?;
@@ -77,6 +88,7 @@ pub fn run(config: &Config, opts: &CallsOptions) -> Result<()> {
             from: opts.from.clone(),
             to: opts.to.clone(),
             hops: hop_count,
+            scope: opts.filter.label().to_string(),
             latency_ms: total_latency_ms,
             path_count: paths.len(),
             paths,
@@ -89,7 +101,7 @@ pub fn run(config: &Config, opts: &CallsOptions) -> Result<()> {
     // ASCII / Table formatting
     let chain_str = hop_chain.join(" ➔ ");
     println!("================================================================================");
-    println!("  CALL GRAPH TRAVERSAL: {} ({} hops)", chain_str, hop_count);
+    println!("  CALL GRAPH TRAVERSAL: {} ({} hops, scope: {})", chain_str, hop_count, opts.filter.label());
     println!("  Latency: {:.2} ms | Resolved Paths: {}", total_latency_ms, res.rows.len());
     println!("================================================================================");
 
@@ -162,37 +174,51 @@ fn select_or_build_query(
     from: &str,
     to: &str,
     explicit_hops: Option<usize>,
+    filter: ScopeFilter,
+    cache_root: Option<&Path>,
 ) -> Result<(String, Vec<String>, usize)> {
     // 1. Web-to-Search Traversal (4-hop): rlex -> actix-web -> regex -> aho-corasick -> memchr
-    if (from.contains("rlex") || from.contains("viz")) && to.contains("memchr") {
-        let q = r#"
+    if (from == "rlex" || from == "rlex-viz") && to == "memchr" {
+        let q = format!(
+            r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
 SELECT ?rlexFile ?actixFile ?regexFile ?ahoFile ?memchrTarget
-WHERE {
-  GRAPH <https://repolex.ai/r/repolex-ai/rlex/lsp/550a8e5a1a7b121bd970eff3e7575acd158f6bb8> {
+WHERE {{
+  GRAPH <https://repolex.ai/r/repolex-ai/rlex/lsp/550a8e5a1a7b121bd970eff3e7575acd158f6bb8> {{
     ?e1 lx:resolutionSourceFile ?rlexFile ;
         lx:externalPackage "actix-web" .
-  }
-  GRAPH <https://repolex.ai/r/actix/actix-web/lsp/5723cf486522d47aad26390cf5b02e95654ae225> {
+    {f_rlex}
+  }}
+  GRAPH <https://repolex.ai/r/actix/actix-web/lsp/5723cf486522d47aad26390cf5b02e95654ae225> {{
     ?e2 lx:resolutionSourceFile ?actixFile ;
         lx:externalPackage "regex" .
-  }
-  GRAPH <https://repolex.ai/r/rust-lang/regex/lsp/25a15e272b3ae5aee76b525902c2ab91b0d9e12e> {
+    {f_actix}
+  }}
+  GRAPH <https://repolex.ai/r/rust-lang/regex/lsp/25a15e272b3ae5aee76b525902c2ab91b0d9e12e> {{
     ?e3 lx:resolutionSourceFile ?regexFile ;
         lx:externalPackage "aho-corasick" .
-  }
-  GRAPH <https://repolex.ai/r/BurntSushi/aho-corasick/lsp/d84a5073d5108fce1774b375105dfdb13fe4e81c> {
+    {f_regex}
+  }}
+  GRAPH <https://repolex.ai/r/BurntSushi/aho-corasick/lsp/d84a5073d5108fce1774b375105dfdb13fe4e81c> {{
     ?e4 lx:resolutionSourceFile ?ahoFile ;
         lx:externalPackage "memchr" ;
         lx:callTarget ?memchrTarget .
-  }
-}
+    {f_aho}
+    {f_memchr}
+  }}
+}}
 LIMIT 20
-"#;
+"#,
+            f_rlex = filter.sparql_filter("?rlexFile"),
+            f_actix = filter.sparql_filter("?actixFile"),
+            f_regex = filter.sparql_filter("?regexFile"),
+            f_aho = filter.sparql_filter("?ahoFile"),
+            f_memchr = filter.sparql_filter("?memchrTarget"),
+        );
         return Ok((
-            q.to_string(),
+            q,
             vec![
-                "rlex-viz".into(),
+                "rlex".into(),
                 "actix-web".into(),
                 "regex".into(),
                 "aho-corasick".into(),
@@ -203,29 +229,39 @@ LIMIT 20
     }
 
     // 2. actix-web -> memchr (3-hop)
-    if from.contains("actix") && to.contains("memchr") {
-        let q = r#"
+    if (from == "actix" || from == "actix-web") && to == "memchr" {
+        let q = format!(
+            r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
 SELECT ?actixFile ?regexFile ?ahoFile ?memchrTarget
-WHERE {
-  GRAPH <https://repolex.ai/r/actix/actix-web/lsp/5723cf486522d47aad26390cf5b02e95654ae225> {
+WHERE {{
+  GRAPH <https://repolex.ai/r/actix/actix-web/lsp/5723cf486522d47aad26390cf5b02e95654ae225> {{
     ?e1 lx:resolutionSourceFile ?actixFile ;
         lx:externalPackage "regex" .
-  }
-  GRAPH <https://repolex.ai/r/rust-lang/regex/lsp/25a15e272b3ae5aee76b525902c2ab91b0d9e12e> {
+    {f_actix}
+  }}
+  GRAPH <https://repolex.ai/r/rust-lang/regex/lsp/25a15e272b3ae5aee76b525902c2ab91b0d9e12e> {{
     ?e2 lx:resolutionSourceFile ?regexFile ;
         lx:externalPackage "aho-corasick" .
-  }
-  GRAPH <https://repolex.ai/r/BurntSushi/aho-corasick/lsp/d84a5073d5108fce1774b375105dfdb13fe4e81c> {
+    {f_regex}
+  }}
+  GRAPH <https://repolex.ai/r/BurntSushi/aho-corasick/lsp/d84a5073d5108fce1774b375105dfdb13fe4e81c> {{
     ?e3 lx:resolutionSourceFile ?ahoFile ;
         lx:externalPackage "memchr" ;
         lx:callTarget ?memchrTarget .
-  }
-}
+    {f_aho}
+    {f_memchr}
+  }}
+}}
 LIMIT 20
-"#;
+"#,
+            f_actix = filter.sparql_filter("?actixFile"),
+            f_regex = filter.sparql_filter("?regexFile"),
+            f_aho = filter.sparql_filter("?ahoFile"),
+            f_memchr = filter.sparql_filter("?memchrTarget"),
+        );
         return Ok((
-            q.to_string(),
+            q,
             vec![
                 "actix-web".into(),
                 "regex".into(),
@@ -237,62 +273,82 @@ LIMIT 20
     }
 
     // 3. Search Engine Triad (2-hop): regex -> aho-corasick -> memchr
-    if from.contains("regex") && to.contains("memchr") {
-        let q = r#"
+    if from == "regex" && to == "memchr" {
+        let q = format!(
+            r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
 SELECT ?regexFile ?ahoFile ?memchrTarget
-WHERE {
-  GRAPH <https://repolex.ai/r/rust-lang/regex/lsp/25a15e272b3ae5aee76b525902c2ab91b0d9e12e> {
+WHERE {{
+  GRAPH <https://repolex.ai/r/rust-lang/regex/lsp/25a15e272b3ae5aee76b525902c2ab91b0d9e12e> {{
     ?e1 lx:resolutionSourceFile ?regexFile ;
         lx:externalPackage "aho-corasick" .
-  }
-  GRAPH <https://repolex.ai/r/BurntSushi/aho-corasick/lsp/d84a5073d5108fce1774b375105dfdb13fe4e81c> {
+    {f_regex}
+  }}
+  GRAPH <https://repolex.ai/r/BurntSushi/aho-corasick/lsp/d84a5073d5108fce1774b375105dfdb13fe4e81c> {{
     ?e2 lx:resolutionSourceFile ?ahoFile ;
         lx:externalPackage "memchr" ;
         lx:callTarget ?memchrTarget .
-  }
-}
+    {f_aho}
+    {f_memchr}
+  }}
+}}
 LIMIT 20
-"#;
+"#,
+            f_regex = filter.sparql_filter("?regexFile"),
+            f_aho = filter.sparql_filter("?ahoFile"),
+            f_memchr = filter.sparql_filter("?memchrTarget"),
+        );
         return Ok((
-            q.to_string(),
+            q,
             vec!["regex".into(), "aho-corasick".into(), "memchr".into()],
             2,
         ));
     }
 
     // 4. Macro Diamond (4-hop): rlex -> axum -> syn -> quote -> proc-macro2
-    if from.contains("rlex") && to.contains("proc-macro") {
-        let q = r#"
+    if from == "rlex" && (to == "proc-macro2" || to == "proc-macro") {
+        let q = format!(
+            r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
 SELECT ?rlexFile ?axumFile ?synFile ?quoteFile ?pmTarget
-WHERE {
-  GRAPH <https://repolex.ai/r/repolex-ai/rlex/lsp/550a8e5a1a7b121bd970eff3e7575acd158f6bb8> {
+WHERE {{
+  GRAPH <https://repolex.ai/r/repolex-ai/rlex/lsp/550a8e5a1a7b121bd970eff3e7575acd158f6bb8> {{
     ?e1 lx:resolutionSourceFile ?rlexFile ;
         lx:externalPackage "axum" .
-  }
-  GRAPH <https://repolex.ai/r/tokio-rs/axum/lsp/c59208c86fded335cd85e388030ad59347b0e5ae> {
+    {f_rlex}
+  }}
+  GRAPH <https://repolex.ai/r/tokio-rs/axum/lsp/c59208c86fded335cd85e388030ad59347b0e5ae> {{
     ?e2 lx:resolutionSourceFile ?axumFile ;
         lx:externalPackage "syn" ;
         lx:callTarget ?synTarget .
-  }
+    {f_axum}
+  }}
   BIND(REPLACE(REPLACE(STR(?synTarget), '^.*commit/[^/]+/', ''), '#.*$', '') AS ?synFile)
-  GRAPH <https://repolex.ai/r/dtolnay/syn/lsp/7bcb37cdb3399977658c8b52d2441d37e42e48f2> {
+  GRAPH <https://repolex.ai/r/dtolnay/syn/lsp/7bcb37cdb3399977658c8b52d2441d37e42e48f2> {{
     ?e3 lx:resolutionSourceFile ?synFile ;
         lx:externalPackage "quote" ;
         lx:callTarget ?quoteTarget .
-  }
+    {f_syn}
+  }}
   BIND(REPLACE(REPLACE(STR(?quoteTarget), '^.*commit/[^/]+/', ''), '#.*$', '') AS ?quoteFile)
-  GRAPH <https://repolex.ai/r/dtolnay/quote/lsp/842ffde933fdd76cd1681a288bed136d8b95a97a> {
+  GRAPH <https://repolex.ai/r/dtolnay/quote/lsp/842ffde933fdd76cd1681a288bed136d8b95a97a> {{
     ?e4 lx:resolutionSourceFile ?quoteFile ;
         lx:externalPackage "proc-macro2" ;
         lx:callTarget ?pmTarget .
-  }
-}
+    {f_quote}
+    {f_pm}
+  }}
+}}
 LIMIT 25
-"#;
+"#,
+            f_rlex = filter.sparql_filter("?rlexFile"),
+            f_axum = filter.sparql_filter("?axumFile"),
+            f_syn = filter.sparql_filter("?synFile"),
+            f_quote = filter.sparql_filter("?quoteFile"),
+            f_pm = filter.sparql_filter("?pmTarget"),
+        );
         return Ok((
-            q.to_string(),
+            q,
             vec![
                 "rlex".into(),
                 "axum".into(),
@@ -305,33 +361,43 @@ LIMIT 25
     }
 
     // 5. axum -> proc-macro2 (3-hop)
-    if from.contains("axum") && to.contains("proc-macro") {
-        let q = r#"
+    if from == "axum" && (to == "proc-macro2" || to == "proc-macro") {
+        let q = format!(
+            r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
 SELECT ?axumFile ?synFile ?quoteFile ?pmTarget
-WHERE {
-  GRAPH <https://repolex.ai/r/tokio-rs/axum/lsp/c59208c86fded335cd85e388030ad59347b0e5ae> {
+WHERE {{
+  GRAPH <https://repolex.ai/r/tokio-rs/axum/lsp/c59208c86fded335cd85e388030ad59347b0e5ae> {{
     ?e1 lx:resolutionSourceFile ?axumFile ;
         lx:externalPackage "syn" ;
         lx:callTarget ?synTarget .
-  }
+    {f_axum}
+  }}
   BIND(REPLACE(REPLACE(STR(?synTarget), '^.*commit/[^/]+/', ''), '#.*$', '') AS ?synFile)
-  GRAPH <https://repolex.ai/r/dtolnay/syn/lsp/7bcb37cdb3399977658c8b52d2441d37e42e48f2> {
+  GRAPH <https://repolex.ai/r/dtolnay/syn/lsp/7bcb37cdb3399977658c8b52d2441d37e42e48f2> {{
     ?e2 lx:resolutionSourceFile ?synFile ;
         lx:externalPackage "quote" ;
         lx:callTarget ?quoteTarget .
-  }
+    {f_syn}
+  }}
   BIND(REPLACE(REPLACE(STR(?quoteTarget), '^.*commit/[^/]+/', ''), '#.*$', '') AS ?quoteFile)
-  GRAPH <https://repolex.ai/r/dtolnay/quote/lsp/842ffde933fdd76cd1681a288bed136d8b95a97a> {
+  GRAPH <https://repolex.ai/r/dtolnay/quote/lsp/842ffde933fdd76cd1681a288bed136d8b95a97a> {{
     ?e3 lx:resolutionSourceFile ?quoteFile ;
         lx:externalPackage "proc-macro2" ;
         lx:callTarget ?pmTarget .
-  }
-}
+    {f_quote}
+    {f_pm}
+  }}
+}}
 LIMIT 25
-"#;
+"#,
+            f_axum = filter.sparql_filter("?axumFile"),
+            f_syn = filter.sparql_filter("?synFile"),
+            f_quote = filter.sparql_filter("?quoteFile"),
+            f_pm = filter.sparql_filter("?pmTarget"),
+        );
         return Ok((
-            q.to_string(),
+            q,
             vec![
                 "axum".into(),
                 "syn".into(),
@@ -343,42 +409,54 @@ LIMIT 25
     }
 
     // 6. POSIX Layer: socket2 -> libc (1-hop)
-    if from.contains("socket") && to.contains("libc") {
-        let q = r#"
+    if (from == "socket2" || from == "socket") && to == "libc" {
+        let q = format!(
+            r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
 SELECT ?socketFile ?libcTarget
-WHERE {
-  GRAPH <https://repolex.ai/r/rust-lang/socket2/lsp/239dd83a4ced08e514d2c38942aab99791119f0d> {
+WHERE {{
+  GRAPH <https://repolex.ai/r/rust-lang/socket2/lsp/239dd83a4ced08e514d2c38942aab99791119f0d> {{
     ?e lx:resolutionSourceFile ?socketFile ;
        lx:externalPackage "libc" ;
        lx:callTarget ?libcTarget .
-  }
-}
+    {f_src}
+    {f_tgt}
+  }}
+}}
 LIMIT 20
-"#;
-        return Ok((q.to_string(), vec!["socket2".into(), "libc".into()], 1));
+"#,
+            f_src = filter.sparql_filter("?socketFile"),
+            f_tgt = filter.sparql_filter("?libcTarget"),
+        );
+        return Ok((q, vec!["socket2".into(), "libc".into()], 1));
     }
 
     // 7. POSIX Layer: git2 -> libc (1-hop)
-    if from.contains("git2") && to.contains("libc") {
-        let q = r#"
+    if from == "git2" && to == "libc" {
+        let q = format!(
+            r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
 SELECT ?gitFile ?libcTarget
-WHERE {
-  GRAPH <https://repolex.ai/r/rust-lang/git2-rs/lsp/b863968301f0e889fa04afc590d7e2c9a4100dc3> {
+WHERE {{
+  GRAPH <https://repolex.ai/r/rust-lang/git2-rs/lsp/b863968301f0e889fa04afc590d7e2c9a4100dc3> {{
     ?e lx:resolutionSourceFile ?gitFile ;
        lx:externalPackage "libc" ;
        lx:callTarget ?libcTarget .
-  }
-}
+    {f_src}
+    {f_tgt}
+  }}
+}}
 LIMIT 20
-"#;
-        return Ok((q.to_string(), vec!["git2-rs".into(), "libc".into()], 1));
+"#,
+            f_src = filter.sparql_filter("?gitFile"),
+            f_tgt = filter.sparql_filter("?libcTarget"),
+        );
+        return Ok((q, vec!["git2-rs".into(), "libc".into()], 1));
     }
 
     // 8. Compression: flate2 -> miniz_oxide or crc32fast (1-hop)
-    if from.contains("flate") && (to.contains("miniz") || to.contains("crc")) {
-        let target_pkg = if to.contains("miniz") { "miniz_oxide" } else { "crc32fast" };
+    if from == "flate2" && (to == "miniz_oxide" || to == "miniz-oxide" || to == "crc32fast") {
+        let target_pkg = if to.starts_with("miniz") { "miniz_oxide" } else { "crc32fast" };
         let q = format!(
             r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
@@ -386,51 +464,51 @@ SELECT ?flateFile ?target
 WHERE {{
   GRAPH <https://repolex.ai/r/rust-lang/flate2-rs/lsp/93c81772305a102f1ec846bd12713dd7bf1e3f04> {{
     ?e lx:resolutionSourceFile ?flateFile ;
-       lx:externalPackage "{}" ;
+       lx:externalPackage "{target_pkg}" ;
        lx:callTarget ?target .
+    {f_src}
+    {f_tgt}
   }}
 }}
 LIMIT 20
 "#,
-            target_pkg
+            target_pkg = target_pkg,
+            f_src = filter.sparql_filter("?flateFile"),
+            f_tgt = filter.sparql_filter("?target"),
         );
         return Ok((q, vec!["flate2".into(), target_pkg.into()], 1));
     }
 
-    // 9. Generic 1-hop dynamic resolution
-    let source_graph = match from {
-        f if f.contains("rlex") => "https://repolex.ai/r/repolex-ai/rlex/lsp/550a8e5a1a7b121bd970eff3e7575acd158f6bb8",
-        f if f.contains("actix") => "https://repolex.ai/r/actix/actix-web/lsp/5723cf486522d47aad26390cf5b02e95654ae225",
-        f if f.contains("regex") => "https://repolex.ai/r/rust-lang/regex/lsp/25a15e272b3ae5aee76b525902c2ab91b0d9e12e",
-        f if f.contains("aho") => "https://repolex.ai/r/BurntSushi/aho-corasick/lsp/d84a5073d5108fce1774b375105dfdb13fe4e81c",
-        f if f.contains("axum") => "https://repolex.ai/r/tokio-rs/axum/lsp/c59208c86fded335cd85e388030ad59347b0e5ae",
-        f if f.contains("syn") => "https://repolex.ai/r/dtolnay/syn/lsp/7bcb37cdb3399977658c8b52d2441d37e42e48f2",
-        f if f.contains("quote") => "https://repolex.ai/r/dtolnay/quote/lsp/842ffde933fdd76cd1681a288bed136d8b95a97a",
-        f if f.contains("socket") => "https://repolex.ai/r/rust-lang/socket2/lsp/239dd83a4ced08e514d2c38942aab99791119f0d",
-        f if f.contains("flate") => "https://repolex.ai/r/rust-lang/flate2-rs/lsp/93c81772305a102f1ec846bd12713dd7bf1e3f04",
-        _ => bail!("No indexed LSP graph registered for source repository '{}'", from),
-    };
+    // 9. Generic 1-hop dynamic resolution via exact registry/cache lookup
+    let source_repo = registry::resolve_repo(from, cache_root)
+        .ok_or_else(|| anyhow::anyhow!("No indexed LSP graph registered for source repository '{}'", from))?;
+    let source_graph = source_repo.lsp_graph();
 
+    let escaped_to = to.replace('\\', "\\\\").replace('"', "\\\"");
     let q = format!(
         r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
 SELECT ?callerFile ?callTarget
 WHERE {{
-  GRAPH <{}> {{
+  GRAPH <{source_graph}> {{
     ?e lx:resolutionSourceFile ?callerFile ;
        lx:externalPackage ?pkg ;
        lx:callTarget ?callTarget .
     FILTER(LCASE(STR(?pkg)) = "{to}" || STRSTARTS(LCASE(STR(?pkg)), "{to}-") || STRSTARTS(LCASE(STR(?pkg)), "{to}_"))
+    {f_src}
+    {f_tgt}
   }}
 }}
 LIMIT 25
 "#,
-        source_graph,
-        to = to
+        source_graph = source_graph,
+        to = escaped_to,
+        f_src = filter.sparql_filter("?callerFile"),
+        f_tgt = filter.sparql_filter("?callTarget"),
     );
 
     let hops = explicit_hops.unwrap_or(1);
-    Ok((q, vec![from.to_string(), to.to_string()], hops))
+    Ok((q, vec![source_repo.repo, to.to_string()], hops))
 }
 
 #[cfg(test)]
@@ -446,17 +524,24 @@ mod tests {
 
     #[test]
     fn test_select_or_build_query_1hop_filter() {
-        let (q, chain, hops) = select_or_build_query("axum", "syn", None).expect("must build query");
+        let (q, chain, hops) =
+            select_or_build_query("axum", "syn", None, ScopeFilter::prod_only(), None)
+                .expect("must build query");
         assert_eq!(hops, 1);
         assert_eq!(chain, vec!["axum", "syn"]);
         // Ensure precise equality filter rather than loose CONTAINS
         assert!(q.contains(r#"FILTER(LCASE(STR(?pkg)) = "syn""#));
         assert!(!q.contains(r#"CONTAINS(LCASE(STR(?pkg)), "syn")"#));
+        // Ensure prod-only filtering is active by default
+        assert!(q.contains("benches"));
+        assert!(q.contains("tests?"));
     }
 
     #[test]
     fn test_select_or_build_query_multihop_bridging() {
-        let (q, chain, hops) = select_or_build_query("axum", "proc-macro2", None).expect("must build query");
+        let (q, chain, hops) =
+            select_or_build_query("axum", "proc-macro2", None, ScopeFilter::prod_only(), None)
+                .expect("must build query");
         assert_eq!(hops, 3);
         assert_eq!(chain, vec!["axum", "syn", "quote", "proc-macro2"]);
         // Verify cross-commit file bridging BIND statements
@@ -465,5 +550,16 @@ mod tests {
         assert!(q.contains("lx:resolutionSourceFile ?synFile"));
         assert!(q.contains("lx:resolutionSourceFile ?quoteFile"));
     }
-}
 
+    #[test]
+    fn test_include_tests_and_benches_disables_filters() {
+        let all = ScopeFilter {
+            include_tests: true,
+            include_benches: true,
+        };
+        let (q, _, _) = select_or_build_query("actix-web", "memchr", None, all, None)
+            .expect("must build query");
+        assert!(!q.contains("benches"));
+        assert!(!q.contains("tests?"));
+    }
+}

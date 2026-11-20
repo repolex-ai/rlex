@@ -4,17 +4,20 @@ use std::time::Instant;
 
 use crate::client::Client;
 use crate::config::Config;
+use crate::filter::ScopeFilter;
 use crate::registry;
 
 pub struct CyclesOptions {
     pub repo: Option<String>,
     pub format: String,
     pub endpoint: Option<String>,
+    pub filter: ScopeFilter,
 }
 
 #[derive(Debug, Serialize)]
 pub struct CyclesReportJson {
     pub target_scope: String,
+    pub scope: String,
     pub latency_ms: f64,
     pub cycle_count: usize,
     pub cycles: Vec<DetectedCycleJson>,
@@ -34,11 +37,16 @@ pub fn run(config: &Config, opts: &CyclesOptions) -> Result<()> {
 
     let mut cycles: Vec<DetectedCycleJson> = Vec::new();
     let target_scope = opts.repo.clone().unwrap_or_else(|| "Ecosystem Backbone".to_string());
+    let src_filter_opt = opts.filter.sparql_filter_optional("?srcFile");
+    let src_a_filter = opts.filter.sparql_filter("?srcA");
+    let src_b_filter = opts.filter.sparql_filter("?srcB");
 
     if let Some(ref repo_name) = opts.repo {
         // Targeted check for a specific repository
-        let repo_ref = registry::resolve_repo(repo_name, Some(&config.paths.cache))
+        let mut repo_ref = registry::resolve_repo(repo_name, Some(&config.paths.cache))
             .ok_or_else(|| anyhow::anyhow!("Repository '{}' not found in registry or cache", repo_name))?;
+        let repo_eco = registry::detect_ecosystem(&client, &repo_ref);
+        repo_ref.ecosystem = repo_eco;
 
         let lsp_iri = repo_ref.lsp_graph();
 
@@ -54,11 +62,13 @@ WHERE {{
     ?e2 lx:resolutionSourceFile ?srcB ;
         lx:callTargetFile ?srcA .
     FILTER(STR(?srcA) < STR(?srcB))
+    {}
+    {}
   }}
 }}
 LIMIT 20
 "#,
-            lsp_iri
+            lsp_iri, src_a_filter, src_b_filter
         );
 
         if let Ok(res) = client.query(&q_internal) {
@@ -74,24 +84,36 @@ LIMIT 20
             }
         }
 
-        // Check cross-package mutual recursion with its direct dependencies
+        // Check cross-package mutual recursion with its direct dependencies (same ecosystem only)
         let q_outgoing = format!(
             r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
-SELECT DISTINCT ?targetPkg
+SELECT ?targetPkg (SAMPLE(?ct) AS ?sampleTarget)
 WHERE {{
   GRAPH <{}> {{
     ?e lx:externalPackage ?targetPkg .
+    OPTIONAL {{ ?e lx:resolutionSourceFile ?srcFile . }}
+    OPTIONAL {{ ?e lx:callTarget ?ct . }}
+    {}
   }}
 }}
+GROUP BY ?targetPkg
 "#,
-            lsp_iri
+            lsp_iri, src_filter_opt
         );
 
         if let Ok(res) = client.query(&q_outgoing) {
             for row in res.rows {
-                if let Some(target_pkg) = row.first()
-                    && let Some(target_repo) = registry::resolve_repo(target_pkg, Some(&config.paths.cache)) {
+                if let Some(target_pkg) = row.first() {
+                    let sample_target = row.get(1).filter(|s| !s.is_empty()).map(|s| s.as_str());
+                    if let Some(target_repo) = registry::resolve_dep_repo(
+                        &client,
+                        &repo_ref,
+                        repo_eco,
+                        target_pkg,
+                        sample_target,
+                        Some(&config.paths.cache),
+                    ) {
                         let q_reverse = format!(
                             r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
@@ -99,12 +121,15 @@ SELECT (COUNT(?e) as ?cnt)
 WHERE {{
   GRAPH <{}> {{
     ?e lx:externalPackage ?callerPkg .
+    OPTIONAL {{ ?e lx:resolutionSourceFile ?srcFile . }}
     FILTER(LCASE(STR(?callerPkg)) = "{}")
+    {}
   }}
 }}
 "#,
                             target_repo.lsp_graph(),
-                            repo_ref.repo.to_lowercase()
+                            repo_ref.repo.to_lowercase(),
+                            src_filter_opt
                         );
 
                         if let Ok(rev_res) = client.query(&q_reverse) {
@@ -123,13 +148,17 @@ WHERE {{
                             }
                         }
                     }
+                }
             }
         }
     } else {
-        // Ecosystem-wide mutual call scan across registered backbone pairs
+        // Ecosystem-wide mutual call scan across registered backbone pairs (same ecosystem only)
         let backbone = registry::get_backbone();
         for (i, r1) in backbone.iter().enumerate() {
             for r2 in backbone.iter().skip(i + 1) {
+                if r1.ecosystem.is_some() && r2.ecosystem.is_some() && r1.ecosystem != r2.ecosystem {
+                    continue;
+                }
                 let q_check = format!(
                     r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
@@ -139,7 +168,9 @@ WHERE {{
     SELECT (COUNT(?e1) AS ?cnt1) WHERE {{
       GRAPH <{}> {{
         ?e1 lx:externalPackage ?pkgB .
+        OPTIONAL {{ ?e1 lx:resolutionSourceFile ?srcFile . }}
         FILTER(LCASE(STR(?pkgB)) = "{}")
+        {}
       }}
     }}
   }}
@@ -147,7 +178,9 @@ WHERE {{
     SELECT (COUNT(?e2) AS ?cnt2) WHERE {{
       GRAPH <{}> {{
         ?e2 lx:externalPackage ?pkgA .
+        OPTIONAL {{ ?e2 lx:resolutionSourceFile ?srcFile . }}
         FILTER(LCASE(STR(?pkgA)) = "{}")
+        {}
       }}
     }}
   }}
@@ -155,24 +188,29 @@ WHERE {{
 "#,
                     r1.lsp_graph(),
                     r2.repo.to_lowercase(),
+                    src_filter_opt,
                     r2.lsp_graph(),
-                    r1.repo.to_lowercase()
+                    r1.repo.to_lowercase(),
+                    src_filter_opt
                 );
 
                 if let Ok(res) = client.query(&q_check)
-                    && let Some(row) = res.rows.first() {
-                        let c1 = row.first().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-                        let c2 = row.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-                        if c1 > 0 && c2 > 0 {
-                            cycles.push(DetectedCycleJson {
-                                cycle_type: "Ecosystem Mutual Recursion".into(),
-                                entity_a: r1.repo.clone(),
-                                entity_b: r2.repo.clone(),
-                                evidence: format!("{} calls {} ({} times), and {} calls {} ({} times)",
-                                    r1.repo, r2.repo, c1, r2.repo, r1.repo, c2),
-                            });
-                        }
+                    && let Some(row) = res.rows.first()
+                {
+                    let c1 = row.first().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                    let c2 = row.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                    if c1 > 0 && c2 > 0 {
+                        cycles.push(DetectedCycleJson {
+                            cycle_type: "Ecosystem Mutual Recursion".into(),
+                            entity_a: r1.repo.clone(),
+                            entity_b: r2.repo.clone(),
+                            evidence: format!(
+                                "{} calls {} ({} times), and {} calls {} ({} times)",
+                                r1.repo, r2.repo, c1, r2.repo, r1.repo, c2
+                            ),
+                        });
                     }
+                }
             }
         }
     }
@@ -182,6 +220,7 @@ WHERE {{
     if opts.format == "json" {
         let report = CyclesReportJson {
             target_scope,
+            scope: opts.filter.label().to_string(),
             latency_ms: elapsed_ms,
             cycle_count: cycles.len(),
             cycles,
@@ -191,7 +230,7 @@ WHERE {{
     }
 
     println!("================================================================================");
-    println!("  CYCLIC DEPENDENCY & RECURSION DETECTOR: {}", target_scope);
+    println!("  CYCLIC DEPENDENCY & RECURSION DETECTOR: {} (scope: {})", target_scope, opts.filter.label());
     println!("  Execution Latency: {:.2} ms | Verified Across 118M Quads", elapsed_ms);
     println!("================================================================================");
 

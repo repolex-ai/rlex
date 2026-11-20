@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::client::Client;
 use crate::config::Config;
+use crate::filter::ScopeFilter;
 use crate::registry;
 
 pub struct DiamondOptions {
@@ -12,11 +13,13 @@ pub struct DiamondOptions {
     pub to: Option<String>,
     pub format: String,
     pub endpoint: Option<String>,
+    pub filter: ScopeFilter,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DiamondReportJson {
     pub root: String,
+    pub scope: String,
     pub latency_ms: f64,
     pub diamond_count: usize,
     pub diamonds: Vec<DiamondConvergenceJson>,
@@ -34,40 +37,62 @@ pub fn run(config: &Config, opts: &DiamondOptions) -> Result<()> {
     let client = Client::new(config, opts.endpoint.as_deref())?;
     let t0 = Instant::now();
 
-    let root = registry::resolve_repo(&opts.from, Some(&config.paths.cache))
+    let mut root = registry::resolve_repo(&opts.from, Some(&config.paths.cache))
         .ok_or_else(|| anyhow::anyhow!("Repository '{}' not found in registry or cache", opts.from))?;
+    let root_eco = registry::detect_ecosystem(&client, &root);
+    root.ecosystem = root_eco;
 
     let root_name = root.repo.clone();
+    let src_filter = opts.filter.sparql_filter_optional("?srcFile");
 
     // 1. Get direct outgoing dependencies from root
     let root_lsp = root.lsp_graph();
     let q_direct = format!(
         r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
-SELECT ?targetPkg (COUNT(?e) as ?cnt)
+SELECT ?targetPkg (COUNT(?e) as ?cnt) (SAMPLE(?ct) as ?sampleTarget)
 WHERE {{
   GRAPH <{}> {{
     ?e lx:externalPackage ?targetPkg .
+    OPTIONAL {{ ?e lx:resolutionSourceFile ?srcFile . }}
+    OPTIONAL {{ ?e lx:callTarget ?ct . }}
+    {}
   }}
 }}
 GROUP BY ?targetPkg
 "#,
-        root_lsp
+        root_lsp, src_filter
     );
 
     let res_direct = client.query(&q_direct)?;
     let mut direct_calls: HashMap<String, usize> = HashMap::new();
+    let mut direct_sample_targets: HashMap<String, String> = HashMap::new();
     for row in res_direct.rows {
         if let Some(pkg) = row.first() {
             let count = row.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-            direct_calls.insert(pkg.clone(), count);
+            if count > 0 {
+                direct_calls.insert(pkg.clone(), count);
+                if let Some(ct) = row.get(2)
+                    && !ct.is_empty()
+                {
+                    direct_sample_targets.insert(pkg.clone(), ct.clone());
+                }
+            }
         }
     }
 
-    // 2. For each direct dependency that is in registry/cache, get its outgoing packages
+    // 2. For each direct dependency resolved strictly within ecosystem, get its outgoing packages
     let mut intermediate_calls: HashMap<String, HashMap<String, usize>> = HashMap::new();
     for direct_pkg in direct_calls.keys() {
-        if let Some(direct_repo) = registry::resolve_repo(direct_pkg, Some(&config.paths.cache)) {
+        let sample_target = direct_sample_targets.get(direct_pkg).map(|s| s.as_str());
+        if let Some(direct_repo) = registry::resolve_dep_repo(
+            &client,
+            &root,
+            root_eco,
+            direct_pkg,
+            sample_target,
+            Some(&config.paths.cache),
+        ) {
             let lsp_iri = direct_repo.lsp_graph();
             let q_sub = format!(
                 r#"
@@ -76,11 +101,13 @@ SELECT ?targetPkg (COUNT(?e) as ?cnt)
 WHERE {{
   GRAPH <{}> {{
     ?e lx:externalPackage ?targetPkg .
+    OPTIONAL {{ ?e lx:resolutionSourceFile ?srcFile . }}
+    {}
   }}
 }}
 GROUP BY ?targetPkg
 "#,
-                lsp_iri
+                lsp_iri, src_filter
             );
 
             if let Ok(res_sub) = client.query(&q_sub) {
@@ -88,7 +115,9 @@ GROUP BY ?targetPkg
                 for row in res_sub.rows {
                     if let Some(pkg) = row.first() {
                         let count = row.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-                        map.insert(pkg.clone(), count);
+                        if count > 0 {
+                            map.insert(pkg.clone(), count);
+                        }
                     }
                 }
                 intermediate_calls.insert(direct_pkg.clone(), map);
@@ -162,6 +191,7 @@ GROUP BY ?targetPkg
     if opts.format == "json" {
         let report = DiamondReportJson {
             root: root_name,
+            scope: opts.filter.label().to_string(),
             latency_ms: elapsed_ms,
             diamond_count: diamonds.len(),
             diamonds,
@@ -171,7 +201,8 @@ GROUP BY ?targetPkg
     }
 
     println!("================================================================================");
-    println!("  DIAMOND CONVERGENCE SOLVER: {} ({} converging targets found)", root_name, diamonds.len());
+    println!("  DIAMOND CONVERGENCE SOLVER: {} (scope: {}, {} converging targets found)",
+        root_name, opts.filter.label(), diamonds.len());
     println!("  Traversed in {:.2} ms across 118M quads", elapsed_ms);
     println!("================================================================================");
 
@@ -190,7 +221,8 @@ GROUP BY ?targetPkg
         }
     }
 
-    println!("\nDiamond analysis completed in {:.2} ms (Target <10ms: PASS ✓)", elapsed_ms);
+    let status = if elapsed_ms < 10.0 { "PASS ✓" } else { "FAIL" };
+    println!("\nDiamond analysis completed in {:.2} ms (Target <10ms: {})", elapsed_ms, status);
 
     Ok(())
 }

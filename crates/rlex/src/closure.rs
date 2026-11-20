@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::client::Client;
 use crate::config::Config;
+use crate::filter::ScopeFilter;
 use crate::registry;
 
 pub struct ClosureOptions {
@@ -13,6 +14,7 @@ pub struct ClosureOptions {
     pub max_depth: usize,
     pub format: String,
     pub endpoint: Option<String>,
+    pub filter: ScopeFilter,
 }
 
 #[derive(Debug, Serialize)]
@@ -20,6 +22,7 @@ pub struct ClosureReportJson {
     pub from: String,
     pub to: Option<String>,
     pub max_depth: usize,
+    pub scope: String,
     pub latency_ms: f64,
     pub total_nodes: usize,
     pub total_edges: usize,
@@ -39,41 +42,47 @@ pub fn run(config: &Config, opts: &ClosureOptions) -> Result<()> {
     let client = Client::new(config, opts.endpoint.as_deref())?;
     let t0 = Instant::now();
 
-    let root = registry::resolve_repo(&opts.from, Some(&config.paths.cache))
+    let mut root = registry::resolve_repo(&opts.from, Some(&config.paths.cache))
         .ok_or_else(|| anyhow::anyhow!("Repository '{}' not found in registry or cache", opts.from))?;
+    let root_eco = registry::detect_ecosystem(&client, &root);
+    root.ecosystem = root_eco;
 
     let root_name = format!("{}/{}", root.org, root.repo);
     let mut edges: Vec<ClosureEdgeJson> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(registry::RepoRef, usize)> = VecDeque::new();
 
-    visited.insert(root_name.clone());
+    visited.insert(root_name.to_lowercase());
     visited.insert(root.repo.to_lowercase());
     queue.push_back((root, 0));
 
     let max_depth = opts.max_depth.clamp(1, 6);
+    let src_filter = opts.filter.sparql_filter_optional("?srcFile");
 
     while let Some((curr_repo, depth)) = queue.pop_front() {
         if depth >= max_depth {
             continue;
         }
 
+        let curr_eco = curr_repo.ecosystem.or(root_eco);
         let lsp_iri = curr_repo.lsp_graph();
         let sparql = format!(
             r#"
 PREFIX lx: <https://repolex.ai/ontology/repolex/lsp-extension/>
-SELECT ?targetPkg (COUNT(?e) as ?callCount) (SAMPLE(?srcFile) as ?sampleFile)
+SELECT ?targetPkg (COUNT(?e) as ?callCount) (SAMPLE(?srcFile) as ?sampleFile) (SAMPLE(?ct) as ?sampleTarget)
 WHERE {{
   GRAPH <{}> {{
     ?e lx:externalPackage ?targetPkg .
     OPTIONAL {{ ?e lx:resolutionSourceFile ?srcFile . }}
+    OPTIONAL {{ ?e lx:callTarget ?ct . }}
+    {}
   }}
 }}
 GROUP BY ?targetPkg
 ORDER BY DESC(?callCount)
 LIMIT 50
 "#,
-            lsp_iri
+            lsp_iri, src_filter
         );
 
         if let Ok(res) = client.query(&sparql) {
@@ -84,8 +93,9 @@ LIMIT 50
                 let target_pkg = row.first().cloned().unwrap_or_default();
                 let count = row.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
                 let sample_file = row.get(2).cloned().unwrap_or_else(|| "unknown".into());
+                let sample_target = row.get(3).filter(|s| !s.is_empty()).map(|s| s.as_str());
 
-                if target_pkg.is_empty() {
+                if target_pkg.is_empty() || count == 0 {
                     continue;
                 }
 
@@ -98,12 +108,22 @@ LIMIT 50
                 };
                 edges.push(edge);
 
-                // Check if target is a known repo in registry/cache
+                // Resolve next hop strictly within ecosystem + exact package match
                 let target_norm = target_pkg.to_lowercase();
                 if !visited.contains(&target_norm) {
-                    visited.insert(target_norm.clone());
-                    if let Some(next_repo) = registry::resolve_repo(&target_pkg, Some(&config.paths.cache)) {
-                        queue.push_back((next_repo, depth + 1));
+                    visited.insert(target_norm);
+                    if let Some(next_repo) = registry::resolve_dep_repo(
+                        &client,
+                        &curr_repo,
+                        curr_eco,
+                        &target_pkg,
+                        sample_target,
+                        Some(&config.paths.cache),
+                    ) {
+                        let next_key = format!("{}/{}", next_repo.org, next_repo.repo).to_lowercase();
+                        if visited.insert(next_key) {
+                            queue.push_back((next_repo, depth + 1));
+                        }
                     }
                 }
             }
@@ -135,6 +155,7 @@ LIMIT 50
             from: opts.from.clone(),
             to: opts.to.clone(),
             max_depth,
+            scope: opts.filter.label().to_string(),
             latency_ms: elapsed_ms,
             total_nodes: distinct_nodes.len(),
             total_edges: filtered_edges.len(),
@@ -146,8 +167,8 @@ LIMIT 50
 
     if opts.format == "table" {
         println!("================================================================================");
-        println!("  TRANSITIVE CALL CLOSURE: {} (depth: {}, {} nodes, {} edges)",
-            root_name, max_depth, distinct_nodes.len(), filtered_edges.len());
+        println!("  TRANSITIVE CALL CLOSURE: {} (depth: {}, scope: {}, {} nodes, {} edges)",
+            root_name, max_depth, opts.filter.label(), distinct_nodes.len(), filtered_edges.len());
         println!("  Execution Latency: {:.2} ms", elapsed_ms);
         println!("================================================================================");
         let headers = ["Hop", "Caller", "Target Dependency", "Calls", "Sample Source File"];
@@ -167,8 +188,8 @@ LIMIT 50
     // Default ASCII tree output
     println!("================================================================================");
     println!("  TRANSITIVE CALL CLOSURE GRAPH: {}", root_name);
-    println!("  Depth: {} | Reachable Packages: {} | Inter-Repo Edges: {}",
-        max_depth, distinct_nodes.len().saturating_sub(1), filtered_edges.len());
+    println!("  Depth: {} | Scope: {} | Reachable Packages: {} | Inter-Repo Edges: {}",
+        max_depth, opts.filter.label(), distinct_nodes.len().saturating_sub(1), filtered_edges.len());
     println!("  Traversed in: {:.2} ms across 118M quads", elapsed_ms);
     println!("================================================================================");
 
@@ -195,7 +216,8 @@ LIMIT 50
         }
     }
 
-    println!("\nTransitive closure computed in {:.2} ms (Target <10ms: PASS ✓)", elapsed_ms);
+    let status = if elapsed_ms < 10.0 { "PASS ✓" } else { "FAIL" };
+    println!("\nTransitive closure computed in {:.2} ms (Target <10ms: {})", elapsed_ms, status);
 
     Ok(())
 }
