@@ -260,13 +260,67 @@ fn download_file(
         bail!("Download failed for {}: HTTP {}", url, response.status());
     }
 
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
     let bytes = response.bytes()
         .with_context(|| format!("reading response from {}", url))?;
 
-    fs::write(dest, &bytes)
-        .with_context(|| format!("writing {}", dest.display()))?;
+    validate_graph_bytes(dest, content_type.as_deref(), &bytes)
+        .with_context(|| format!("invalid graph payload from {}", url))?;
+
+    let tmp_dest = dest.with_extension("tmp");
+    fs::write(&tmp_dest, &bytes)
+        .with_context(|| format!("writing {}", tmp_dest.display()))?;
+    fs::rename(&tmp_dest, dest)
+        .with_context(|| format!("renaming {} -> {}", tmp_dest.display(), dest.display()))?;
 
     println!("ok");
+    Ok(())
+}
+
+/// Guard against caching GitHub HTML error pages or truncated non-gzip payloads as graph data.
+fn validate_graph_bytes(
+    dest: &std::path::Path,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<()> {
+    if bytes.is_empty() {
+        bail!("empty response body");
+    }
+    if let Some(ct) = content_type
+        && ct.to_ascii_lowercase().contains("text/html")
+    {
+        bail!("refusing to cache HTML response (Content-Type: {})", ct);
+    }
+
+    let is_gz = dest
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gz"))
+        .unwrap_or(false);
+
+    if is_gz {
+        if bytes.len() < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b {
+            let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(64)]);
+            bail!(
+                "expected gzip magic bytes (1f 8b) for {}, got: {:?}",
+                dest.display(),
+                preview
+            );
+        }
+    } else {
+        let prefix = String::from_utf8_lossy(&bytes[..bytes.len().min(128)])
+            .trim_start()
+            .to_ascii_lowercase();
+        if prefix.starts_with("<!doctype") || prefix.starts_with("<html") {
+            bail!("refusing to cache HTML document as graph data");
+        }
+    }
+
     Ok(())
 }
 
@@ -344,4 +398,33 @@ pub struct CachedCommit {
     pub hexsha: String,
     pub file_count: u32,
     pub total_size: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_validate_graph_bytes_rejects_html_in_gz() {
+        let html = b"<!DOCTYPE html><html><body>Rate limit exceeded</body></html>";
+        let res = validate_graph_bytes(Path::new("chunk-001.nq.gz"), Some("text/html"), html);
+        assert!(res.is_err());
+
+        // Even without text/html header, non-gzip bytes into .gz must fail
+        let res2 = validate_graph_bytes(Path::new("chunk-001.nq.gz"), None, html);
+        assert!(res2.is_err());
+    }
+
+    #[test]
+    fn test_validate_graph_bytes_accepts_gzip_and_nquads() {
+        let gz = [0x1f, 0x8b, 0x08, 0x00, 0x00];
+        assert!(validate_graph_bytes(Path::new("chunk-001.nq.gz"), Some("application/octet-stream"), &gz).is_ok());
+
+        let nq = b"<https://repolex.ai/s> <https://repolex.ai/p> \"v\" <https://repolex.ai/g> .\n";
+        assert!(validate_graph_bytes(Path::new("chunk-001.nq"), Some("text/plain"), nq).is_ok());
+
+        let html = b"  <html><body>502 Bad Gateway</body></html>";
+        assert!(validate_graph_bytes(Path::new("chunk-001.nq"), None, html).is_err());
+    }
 }

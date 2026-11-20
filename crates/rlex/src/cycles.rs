@@ -231,7 +231,7 @@ WHERE {{
 
     println!("================================================================================");
     println!("  CYCLIC DEPENDENCY & RECURSION DETECTOR: {} (scope: {})", target_scope, opts.filter.label());
-    println!("  Execution Latency: {:.2} ms | Verified Across 118M Quads", elapsed_ms);
+    println!("  Execution Latency: {:.2} ms | Live Oxigraph Store", elapsed_ms);
     println!("================================================================================");
 
     if cycles.is_empty() {

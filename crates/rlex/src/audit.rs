@@ -15,20 +15,21 @@ pub struct AuditReportJson {
     pub store_disk_size_mb: f64,
     pub backend_mode: String,
     pub endpoint: Option<String>,
-    pub total_quads: u64,
+    pub total_named_graphs: u64,
     pub repositories_count: usize,
-    pub releases_count: usize,
     pub graph_distribution: GraphDistributionJson,
     pub probes: Vec<ProbeResultJson>,
     pub index_health: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 pub struct GraphDistributionJson {
-    pub ast_quads: u64,
-    pub repolex_quads: u64,
-    pub lsp_quads: u64,
-    pub git_structure_quads: u64,
+    pub ast_graphs: u64,
+    pub repolex_graphs: u64,
+    pub lsp_graphs: u64,
+    pub dep_graphs: u64,
+    pub filetree_graphs: u64,
+    pub other_graphs: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,19 +88,36 @@ SELECT ?m WHERE {
 
     probes.push(ProbeResultJson {
         name: "4-Hop Web-to-Search Traversal".into(),
-        description: "rlex-viz ➔ actix-web ➔ regex ➔ aho-corasick ➔ memchr".into(),
+        description: "rlex ➔ actix-web ➔ regex ➔ aho-corasick ➔ memchr".into(),
         latency_ms: p2_lat,
         status: if p2_ok && p2_lat < 15.0 { "PASS (Healthy)" } else if p2_ok { "PASS (Warm)" } else { "FAIL" }.into(),
     });
 
-    // Known verified store stats at current milestone
-    let total_quads = 118_647_867u64;
-    let graph_dist = GraphDistributionJson {
-        ast_quads: 82_450_119,
-        repolex_quads: 18_812_040,
-        lsp_quads: 3_215_900,
-        git_structure_quads: 14_169_808,
-    };
+    // Live named-graph distribution from the store
+    let mut graph_dist = GraphDistributionJson::default();
+    let mut total_named_graphs = 0u64;
+    let q_graphs = r#"
+SELECT ?type (COUNT(DISTINCT ?g) AS ?cnt) WHERE {
+  GRAPH ?g {}
+  BIND(REPLACE(STR(?g), "^https://repolex\\.ai/r/[^/]+/[^/]+/([^/]+)(/.*)?$", "$1") AS ?type)
+}
+GROUP BY ?type
+"#;
+    if let Ok(res) = client.query(q_graphs) {
+        for row in &res.rows {
+            let gtype = row.first().map(|s| s.as_str()).unwrap_or("");
+            let cnt = row.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            total_named_graphs += cnt;
+            match gtype {
+                "ast" => graph_dist.ast_graphs += cnt,
+                "repolex" => graph_dist.repolex_graphs += cnt,
+                "lsp" => graph_dist.lsp_graphs += cnt,
+                "dep" => graph_dist.dep_graphs += cnt,
+                "filetree" => graph_dist.filetree_graphs += cnt,
+                _ => graph_dist.other_graphs += cnt,
+            }
+        }
+    }
 
     let backend_mode = if client.is_remote() {
         "HTTP Remote Endpoint".into()
@@ -111,6 +129,15 @@ SELECT ?m WHERE {
 
     // List cached repos
     let repos = list_cached_repo_inventory(&config.paths.cache);
+    let all_probes_ok = p1_ok && p2_ok;
+    let probes_under_sla = p1_ok && p1_lat < 10.0 && p2_ok && p2_lat < 15.0;
+    let health_summary = if !all_probes_ok {
+        "DEGRADED — one or more query probes failed"
+    } else if probes_under_sla {
+        "STORE HEALTHY — all probes passed within latency SLA"
+    } else {
+        "STORE HEALTHY (cold/warm probes above <10ms SLA)"
+    };
 
     if json {
         let report = AuditReportJson {
@@ -119,12 +146,11 @@ SELECT ?m WHERE {
             store_disk_size_mb: store_size_mb,
             backend_mode,
             endpoint: endpoint_str,
-            total_quads,
+            total_named_graphs,
             repositories_count: repos.len(),
-            releases_count: 31,
             graph_distribution: graph_dist,
             probes,
-            index_health: "OPTIMAL (Zero corruption, warm RocksDB SST block cache)".into(),
+            index_health: health_summary.into(),
         };
 
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -141,21 +167,23 @@ SELECT ?m WHERE {
     if let Some(ref ep) = endpoint_str {
         println!("  SPARQL Endpoint:    {} [ONLINE]", ep);
     }
-    println!("  Total Quads Live:   {:>12} quads (118.65M scale milestone)", format_number(total_quads));
-    println!("  Ingested Scope:     {} packages across 31 tagged releases", repos.len());
+    println!("  Named Graphs Live:  {:>12} graphs", format_number(total_named_graphs));
+    println!("  Cached Scope:       {} repositories in local cache", repos.len());
     println!("--------------------------------------------------------------------------------");
-    println!("  Graph Type Distribution:");
-    println!("    • AST blob & syntax graphs:     {:>10} quads (69.5%)", format_number(graph_dist.ast_quads));
-    println!("    • Repolex CallSite & semantic:  {:>10} quads (15.9%)", format_number(graph_dist.repolex_quads));
-    println!("    • LSP cross-repo call edges:    {:>10} quads ( 2.7%)", format_number(graph_dist.lsp_quads));
-    println!("    • Git structure & manifests:    {:>10} quads (11.9%)", format_number(graph_dist.git_structure_quads));
+    println!("  Live Named Graph Distribution:");
+    println!("    • AST syntax graphs:            {:>10} graphs", format_number(graph_dist.ast_graphs));
+    println!("    • Repolex semantic graphs:      {:>10} graphs", format_number(graph_dist.repolex_graphs));
+    println!("    • LSP call-resolution graphs:   {:>10} graphs", format_number(graph_dist.lsp_graphs));
+    println!("    • Dependency manifest graphs:   {:>10} graphs", format_number(graph_dist.dep_graphs));
+    println!("    • Filetree graphs:              {:>10} graphs", format_number(graph_dist.filetree_graphs));
+    println!("    • Git / other metadata graphs:  {:>10} graphs", format_number(graph_dist.other_graphs));
     println!("--------------------------------------------------------------------------------");
     println!("  Store Responsiveness & Query Integrity Probes:");
     for p in &probes {
         println!("    • {:<30}  {:>7.2} ms  [{}]", p.name, p.latency_ms, p.status);
     }
     println!("--------------------------------------------------------------------------------");
-    println!("  Key Ingested Repositories:");
+    println!("  Key Cached Repositories:");
     for (idx, (pkg, commit, size)) in repos.iter().take(12).enumerate() {
         println!("    {:2}. {:<32}  {}  ({:.1} MB)", idx + 1, pkg, commit, size);
     }
@@ -163,7 +191,7 @@ SELECT ?m WHERE {
         println!("    ... and {} more repositories in local cache", repos.len() - 12);
     }
     println!("================================================================================");
-    println!("  Overall Status: STORE HEALTHY — 100% index integrity (target <10ms: PASSED)");
+    println!("  Overall Status: {}", health_summary);
     println!("================================================================================");
 
     Ok(())

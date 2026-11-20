@@ -25,7 +25,7 @@ mod viz;
 mod warmup;
 
 #[derive(Parser)]
-#[command(name = "rlex", about = "SPARQL query tool for repolex knowledge graphs")]
+#[command(name = "rlex", version, about = "SPARQL query tool for repolex knowledge graphs")]
 struct Cli {
     /// GitHub organization where parsed data is stored
     #[arg(long, global = true, default_value = "repolex-forx")]

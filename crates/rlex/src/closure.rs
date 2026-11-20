@@ -190,7 +190,7 @@ LIMIT 50
     println!("  TRANSITIVE CALL CLOSURE GRAPH: {}", root_name);
     println!("  Depth: {} | Scope: {} | Reachable Packages: {} | Inter-Repo Edges: {}",
         max_depth, opts.filter.label(), distinct_nodes.len().saturating_sub(1), filtered_edges.len());
-    println!("  Traversed in: {:.2} ms across 118M quads", elapsed_ms);
+    println!("  Traversed in: {:.2} ms across live Oxigraph store", elapsed_ms);
     println!("================================================================================");
 
     if filtered_edges.is_empty() {

@@ -203,7 +203,7 @@ GROUP BY ?targetPkg
     println!("================================================================================");
     println!("  DIAMOND CONVERGENCE SOLVER: {} (scope: {}, {} converging targets found)",
         root_name, opts.filter.label(), diamonds.len());
-    println!("  Traversed in {:.2} ms across 118M quads", elapsed_ms);
+    println!("  Traversed in {:.2} ms across live Oxigraph store", elapsed_ms);
     println!("================================================================================");
 
     if diamonds.is_empty() {
