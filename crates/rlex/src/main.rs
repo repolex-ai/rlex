@@ -307,7 +307,30 @@ enum Commands {
     },
 }
 
+fn raise_nofile_limit() {
+    #[cfg(unix)]
+    unsafe {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+            let target: libc::rlim_t = 65_536;
+            let desired = if rlim.rlim_max == libc::RLIM_INFINITY {
+                target
+            } else {
+                target.min(rlim.rlim_max)
+            };
+            if rlim.rlim_cur < desired {
+                rlim.rlim_cur = desired;
+                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
+    raise_nofile_limit();
     let cli = Cli::parse();
     let mut config = config::Config::load()?;
     config.data_storage_org = cli.data_storage_org;

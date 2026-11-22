@@ -107,6 +107,13 @@ fn load_commit(store: &Store, commit_dir: &Path, org: &str, repo: &str, sha: &st
                 // Unwrap the anyhow chain to the deepest cause for a tight message
                 // (the actual parser error, not our "loading <path>" wrapper).
                 let cause = e.root_cause().to_string();
+                if is_fatal_io_error(&e, &cause) {
+                    println!("FAILED (IO/storage error) — {}", cause);
+                    bail!(
+                        "fatal storage/IO error while loading {}/{} ({}/{}): {}",
+                        org, repo, graph_type, name, cause
+                    );
+                }
                 println!("SKIPPED — {}", cause);
                 failures.push((format!("{}/{}", graph_type, name), cause));
             }
@@ -199,4 +206,38 @@ fn find_commit_dir(repo_cache: &Path, prefix: &str) -> Result<String> {
         }
     }
     bail!("No cached commit matching '{}' found", prefix);
+}
+
+/// Detect storage / OS IO failures (e.g. RocksDB EMFILE "Too many open files",
+/// disk full, permission errors) that must abort `rlex load` with a non-zero exit
+/// rather than being silently treated as skippable RDF syntax errors.
+fn is_fatal_io_error(err: &anyhow::Error, root_cause_msg: &str) -> bool {
+    for cause in err.chain() {
+        if cause.is::<std::io::Error>() {
+            return true;
+        }
+    }
+    let lower = root_cause_msg.to_ascii_lowercase();
+    lower.contains("io error")
+        || lower.contains("too many open files")
+        || lower.contains("no space left")
+        || lower.contains("permission denied")
+        || lower.contains("resource temporarily unavailable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_fatal_io_error_detects_emfile_and_io() {
+        let emfile = anyhow::anyhow!("IO error: While opening a file for sequentially reading: /Volumes/f00/rlex/oxigraph/12345.sst: Too many open files");
+        assert!(is_fatal_io_error(&emfile, &emfile.root_cause().to_string()));
+
+        let io_err: anyhow::Error = std::io::Error::new(std::io::ErrorKind::Other, "disk full").into();
+        assert!(is_fatal_io_error(&io_err, &io_err.root_cause().to_string()));
+
+        let parse_err = anyhow::anyhow!("invalid IRI: unexpected character '['");
+        assert!(!is_fatal_io_error(&parse_err, &parse_err.root_cause().to_string()));
+    }
 }

@@ -2792,6 +2792,7 @@ dependencies = [
  "flate2",
  "iref",
  "json-ld",
+ "libc",
  "oxigraph",
  "regex",
  "reqwest",
