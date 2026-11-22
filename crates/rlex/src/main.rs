@@ -7,6 +7,7 @@ mod calls;
 mod catalog;
 mod client;
 mod closure;
+mod compact;
 mod compaction;
 mod config;
 mod cycles;
@@ -285,6 +286,13 @@ enum Commands {
         include_benches: bool,
     },
 
+    /// Compact the local Oxigraph RocksDB store to reduce SST fan-out and restore read latency
+    Compact {
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Pre-warm RocksDB SST index and bloom filter blocks for core ecosystem graphs
     Warmup {
         /// Emit structured JSON output
@@ -339,7 +347,7 @@ fn main() -> Result<()> {
     // Lazy background sync of forx-index (non-blocking, best effort).
     // Skip for `sync` (avoids concurrent pulls) and `download` (reads the
     // data repo directly; an org may have no forx-index at all).
-    if !matches!(cli.command, Commands::Sync | Commands::Download { .. }) {
+    if !matches!(cli.command, Commands::Sync | Commands::Download { .. } | Commands::Compact { .. }) {
         if let Err(e) = index::sync_background(&config) {
             eprintln!("note: forx-index sync skipped: {e}");
         }
@@ -612,6 +620,9 @@ fn main() -> Result<()> {
                     },
                 },
             )?;
+        }
+        Commands::Compact { json } => {
+            compact::run(&config, json)?;
         }
         Commands::Warmup { json, endpoint } => {
             warmup::run(&config, endpoint.as_deref(), json)?;
